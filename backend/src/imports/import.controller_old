@@ -1,0 +1,72 @@
+import {
+  Controller,
+  Post,
+  UploadedFile,
+  UseInterceptors,
+  Get,
+  Param,
+  Body,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ImportService } from './import.service';
+
+@Controller('imports')
+export class ImportController {
+  constructor(private readonly importService: ImportService) {}
+
+  @Post('upload')
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadFile(@UploadedFile() file: Express.Multer.File) {
+    console.log('📁 File details:', {
+      originalname: file.originalname,
+      filename: file.filename,
+      mimetype: file.mimetype,
+      size: file.size,
+      encoding: file.encoding,
+      buffer: file.buffer?.length ? `${file.buffer.length} bytes` : 'No buffer',
+      fieldname: file.fieldname,
+      destination: file.destination,
+      path: file.path,
+    });
+    return await this.importService.processSpreadsheet(file.buffer);
+  }
+
+  @Get()
+  async getAll() {
+    return await this.importService.findAll();
+  }
+
+  @Get('batch-records/:batchId')
+  async getBatchRecords(@Param('batchId') batchId: string) {
+    return await this.importService.getRecordsByBatch(batchId);
+  }
+
+  @Post('create-batch')
+  async createBatch(@Body() body: { targetDate: string; batchName: string }) {
+    return await this.importService.createBatch(
+      body.targetDate,
+      body.batchName,
+    );
+  }
+
+  @Get('batches')
+  async getBatches() {
+    return await this.importService.getActiveBatches();
+  }
+
+  @Post('process-record/:id')
+  async processRecord(@Param('id') id: string) {
+    return await this.importService.processAndPrint(id);
+  }
+
+  /*
+  @Post('print-batch')
+  async printBatch(@Body() body: { patientIds: string[] }) {
+    // 1. Fetch patients from DB
+    // 2. Generate unique Barcodes for each
+    // 3. Construct TSPL strings
+    // 4. Send to PrinterService
+    
+    return  { message: "Batch sent to simulation logs", count: body.patientIds.length };
+  }*/
+}

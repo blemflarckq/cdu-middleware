@@ -1,0 +1,118 @@
+import { useEffect, useState, useCallback, useMemo } from "react";
+import {
+  type ColumnDef,
+  flexRender,
+  getCoreRowModel,
+  getFilteredRowModel,
+  getSortedRowModel,
+  type SortingState,
+  useReactTable,
+} from "@tanstack/react-table"; //"../ @tanstack/react-table";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Input } from "@/components/ui/input";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { ArrowUpDown } from "lucide-react"; // npm install lucide-react if not present
+
+export function PatientTable() {
+  const [data, setData] = useState([]);
+  const [sorting, setSorting] = useState<SortingState>([]);
+  const [globalFilter, setGlobalFilter] = useState("");
+
+  const fetchPatients = useCallback(async () => {
+    try {
+      const res = await fetch("http://localhost:3000/imports");
+      const json = await res.json();
+      setData(json);
+    } catch (e) { console.error(e); }
+  }, []);
+
+  useEffect(() => {
+    fetchPatients();
+    const interval = setInterval(fetchPatients, 10000);
+    return () => clearInterval(interval);
+  }, [fetchPatients]);
+
+  // Define Columns
+  const columns = useMemo<ColumnDef<any>[]>(() => [
+    {
+      accessorKey: "firstName",
+      header: ({ column }) => (
+        <Button variant="ghost" onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}>
+          Name <ArrowUpDown className="ml-2 h-4 w-4" />
+        </Button>
+      ),
+      cell: ({ row }) => `${row.original.firstName} ${row.original.lastName}`,
+    },
+    { accessorKey: "prescribingFacility", header: "Facility" },
+    { accessorKey: "collectionLocation", header: "Location" },
+    { 
+      accessorKey: "collectionDate", 
+      header: "Date",
+      cell: ({ row }) => new Date(row.getValue("collectionDate")).toLocaleDateString() 
+    },
+  ], []);
+
+  const table = useReactTable({
+    data,
+    columns,
+    state: { sorting, globalFilter },
+    onSortingChange: setSorting,
+    onGlobalFilterChange: setGlobalFilter,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+  });
+
+  return (
+    <Card className="mt-6">
+      <CardHeader className="flex flex-row items-center justify-between">
+        <CardTitle>Imported Patients</CardTitle>
+        <div className="flex w-full max-w-sm items-center space-x-2">
+          <Input
+            placeholder="Search all columns..."
+            value={globalFilter ?? ""}
+            onChange={(e) => setGlobalFilter(e.target.value)}
+            className="h-9"
+          />
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="rounded-md border">
+          <Table>
+            <TableHeader>
+              {table.getHeaderGroups().map((headerGroup) => (
+                <TableRow key={headerGroup.id}>
+                  {headerGroup.headers.map((header) => (
+                    <TableHead key={header.id}>
+                      {flexRender(header.column.columnDef.header, header.getContext())}
+                    </TableHead>
+                  ))}
+                </TableRow>
+              ))}
+            </TableHeader>
+            <TableBody>
+              {table.getRowModel().rows?.length ? (
+                table.getRowModel().rows.map((row) => (
+                  <TableRow key={row.id}>
+                    {row.getVisibleCells().map((cell) => (
+                      <TableCell key={cell.id}>
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                ))
+              ) : (
+                <TableRow>
+                  <TableCell colSpan={columns.length} className="h-24 text-center">
+                    No results.
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}

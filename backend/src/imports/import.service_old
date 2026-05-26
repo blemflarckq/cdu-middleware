@@ -1,0 +1,323 @@
+/* eslint-disable @typescript-eslint/no-unsafe-call */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
+import { Injectable } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import * as XLSX from 'xlsx';
+import { PatientRecord } from '../entities/patient-record.entity';
+import { DispensingBatch } from '../entities/dispensing-batch.entity';
+import { Bag } from '../entities/bag.entity';
+import { Box } from '../entities/box.entity';
+import { IsNull } from 'typeorm';
+import { differenceInDays, subDays, addDays, format, isValid } from 'date-fns';
+
+@Injectable()
+export class ImportService {
+  constructor(
+    @InjectRepository(PatientRecord)
+    private patientRepo: Repository<PatientRecord>,
+
+    @InjectRepository(DispensingBatch)
+    private batchRepo: Repository<DispensingBatch>,
+
+    @InjectRepository(Bag)
+    private bagRepo: Repository<Bag>,
+
+    @InjectRepository(Box)
+    private boxRepo: Repository<Box>,
+  ) {}
+
+  async validateImport(rows: any[]) {
+    const mandatoryFields = [
+      'Patient Name',
+      'Prescription Date',
+      'Regimen Prescribed',
+      'Next Clinical Appointment Date',
+      'Drug Pickup Point',
+      'Primary Contact',
+      'Location',
+    ];
+
+    const metadata = {
+      reportName: rows[1]?.[1] || 'Unknown Report',
+      reportDateRange: rows[2]?.[1] || 'Unknown Range',
+      reportGenerationDate: rows[3]?.[1] || 'Unknown Date',
+    };
+
+    const staged = [];
+    const errors = [];
+
+    // Rows 1-5 are metadata/headers. Data starts at index 6.
+    rows.slice(6).forEach((row, index) => {
+      // 1. Mandatory Check
+      const missing = mandatoryFields.filter(
+        (f) => !row[f] || row[f].toString().trim() === '',
+      );
+      if (missing.length > 0) {
+        errors.push({ line: index + 7, name: row['Patient Name'], missing });
+        return;
+      }
+
+      // 2. Name Splitting
+      const nameParts = row['Patient Name'].trim().split(' ');
+      const lastName = nameParts.length > 1 ? nameParts.pop() : 'Unknown';
+      const firstName = nameParts.join(' ');
+
+      // 3. Phone Prefixing
+      const cleanPhone = row['Primary Contact'].toString().replace(/\D/g, '');
+      const primaryContact = `+266${cleanPhone}`;
+
+      // 4. Date Logic
+      const pDate = new Date(row['Prescription Date']);
+      const aDate = new Date(row['Next Clinical Appointment Date']);
+      let pickupDate = row['Next Drug Pickup Date']
+        ? new Date(row['Next Drug Pickup Date'])
+        : null;
+
+      if (!isValid(pickupDate) && isValid(pDate) && isValid(aDate)) {
+        const diff = differenceInDays(aDate, pDate);
+        const roundedDiff = Math.round(diff / 30) * 30;
+
+        if (roundedDiff === 180) pickupDate = subDays(aDate, 90);
+        else if (roundedDiff === 360) pickupDate = subDays(aDate, 180);
+        else pickupDate = aDate; // Fallback
+      }
+
+      staged.push({
+        ...metadata,
+        firstName,
+        lastName,
+        primaryContact,
+        prescriptionDate: pDate,
+        regimen: row['Regimen Prescribed'],
+        nextClinicalAppointmentDate: aDate,
+        nextDrugPickupDate: pickupDate,
+        drugPickupPoint: row['Drug Pickup Point'],
+        location: row['Location'],
+        patientUniqueId: row['HIV Program ID'],
+        gender: row['Gender'],
+        address: row['Address'],
+        status: 'PENDING',
+      });
+    });
+
+    return { staged, errors };
+  }
+
+  async processSpreadsheet(fileBuffer: Buffer) {
+    const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+    const sheetName = workbook.SheetNames[0];
+    const data = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+
+    if (!data) {
+      console.log(`something went wrong`);
+    }
+
+    const records = data.map((row: any) => {
+      return this.patientRepo.create({
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        firstName: row['First Name'] || row['first_name'],
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        patientUniqueId: row['Unique Id'] || row['unique_id'],
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        lastName: row['Last Name'] || row['last_name'],
+        mobile: String(row['Mobile'] || row['mobile_number']),
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        regimen: row['Regimen'] || row['medicine_regimen'],
+        collectionDate: new Date(
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+          row['Collection Date'] || row['collection_date'],
+        ),
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        collectionLocation: row['Location'] || row['collection_location'],
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        prescribingFacility: row['Facility'] || row['prescribing_facility'],
+      });
+    });
+
+    return this.patientRepo.save(records);
+  }
+
+  async findAll() {
+    return await this.patientRepo.find({
+      order: { createdAt: 'DESC' },
+      take: 50, // Only show the last 50 for performance
+    });
+  }
+
+  async createBatch(targetDate: string, batchName: string) {
+    // 1. Find PENDING records for the date that aren't in a batch
+    const eligibleRecords = await this.patientRepo.find({
+      where: {
+        collectionDate: new Date(targetDate),
+        batch: IsNull(),
+      },
+    });
+
+    if (eligibleRecords.length === 0) {
+      throw new Error('No available records found for this date.');
+    }
+
+    // 2. Create the Batch Header
+    const newBatch = this.batchRepo.create({
+      name: batchName,
+      targetDate: new Date(targetDate),
+      status: 'CREATED',
+    });
+    const savedBatch = await this.batchRepo.save(newBatch);
+
+    // 3. Link records to this batch (Locking them)
+    await this.patientRepo.update(
+      eligibleRecords.map((r) => r.id),
+      { batch: savedBatch, status: 'BATCHED' },
+    );
+
+    return savedBatch;
+  }
+
+  async getActiveBatches() {
+    return await this.batchRepo.find({
+      where: { status: 'CREATED' },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  async getRecordsByBatch(batchId: string) {
+    return await this.patientRepo.find({
+      where: { batch: { id: batchId } },
+      order: { collectionLocation: 'ASC', lastName: 'ASC' }, // Important for production line style
+    });
+  }
+
+  async completeBatch(batchId: string) {
+    await this.batchRepo.update(batchId, { status: 'COMPLETED' });
+    return { success: true };
+  }
+
+  async reprintLabels(recordId: string) {
+    const record = await this.patientRepo.findOne({
+      where: { id: recordId },
+      relations: ['batch'],
+    });
+
+    const bag = await this.bagRepo.findOne({
+      where: { patientRecord: { id: recordId } },
+    });
+
+    if (!record || !bag)
+      throw new Error('Record or Bag not found for reprinting');
+
+    console.log(
+      `\n--- REPRINT INITIATED: ${record.firstName} ${record.lastName} ---`,
+    );
+    console.log(`[TSC] Bag Label: ${bag.barcode} (REPRINT)`);
+    console.log(`[EPSON] Slip: ${record.patientUniqueId}`);
+    console.log(`----------------------------------------------\n`);
+
+    return { success: true };
+  }
+
+  async processAndPrint(recordId: string) {
+    // 1. Fetch the patient and their batch info
+    const record = await this.patientRepo.findOne({
+      where: { id: recordId },
+      relations: ['batch'],
+    });
+
+    if (!record) throw new Error('Patient record not found');
+    if (record.status === 'PRINTED')
+      throw new Error('Labels already printed for this patient');
+
+    // 2. Generate a Unique Barcode for the Bag
+    // Logic: B (Bag) + Date + Random suffix for collision safety
+    const bagBarcode = `B${Date.now().toString().slice(-8)}${Math.floor(Math.random() * 100)}`;
+
+    // 3. Create the Bag in the database
+    const newBag = this.bagRepo.create({
+      barcode: bagBarcode,
+      patientName: `${record.firstName} ${record.lastName}`,
+      collectionLocation: record.collectionLocation,
+      status: 'PRINTED',
+      patientRecord: record,
+    });
+
+    await this.bagRepo.save(newBag);
+
+    // 4. Update the Patient Record status
+    record.status = 'PRINTED';
+    await this.patientRepo.save(record);
+
+    // 5. Hardware Simulation (The "Print" output)
+    console.log(
+      `\n--- HARDWARE COMMANDS FOR: ${record.firstName} ${record.lastName} ---`,
+    );
+    console.log(`[TSC-MB240] (Medicine Label): TEXT "Rx: ${record.regimen}"`);
+    console.log(`[TSC-MB240] (Bag Label): BARCODE "${bagBarcode}"`);
+    console.log(
+      `[EPSON] (Slip): PRINT "Collect at ${record.collectionLocation}"`,
+    );
+    console.log(`----------------------------------------------------------\n`);
+
+    return {
+      success: true,
+      bagBarcode,
+      patient: `${record.firstName} ${record.lastName}`,
+    };
+  }
+
+  async scanBagToBox(bagBarcode: string) {
+    // 1. Find the bag
+    const bag = await this.bagRepo.findOne({
+      where: { barcode: bagBarcode },
+      relations: ['patientRecord'],
+    });
+    if (!bag) throw new Error('Bag not found');
+    if (bag.status === 'BOXED') throw new Error('Bag already in a box');
+
+    // 2. Find or Create an OPEN box for this location
+    let box = await this.boxRepo.findOne({
+      where: { destinationLocation: bag.collectionLocation, status: 'OPEN' },
+    });
+
+    if (!box) {
+      box = this.boxRepo.create({
+        boxNumber: `BOX-${Date.now().toString().slice(-6)}`,
+        destinationLocation: bag.collectionLocation,
+        status: 'OPEN',
+      });
+      await this.boxRepo.save(box);
+    }
+
+    // 3. Link Bag to Box
+    bag.box = box;
+    bag.status = 'BOXED';
+    await this.bagRepo.save(bag);
+
+    return {
+      boxNumber: box.boxNumber,
+      location: box.destinationLocation,
+      patient: bag.patientName,
+    };
+  }
+
+  async closeBox(boxId: string) {
+    const box = await this.boxRepo.findOne({
+      where: { id: boxId },
+      relations: ['bags'],
+    });
+
+    if (!box) throw new Error('Box not found');
+
+    // Example External API Call
+    // await axios.post('https://pharmacy-central.gov/api/dispatch', {
+    //   boxId: box.boxNumber,
+    //   location: box.destinationLocation,
+    //   bagCount: box.bags.length
+    // });
+
+    box.status = 'CLOSED';
+    await this.boxRepo.save(box);
+    return { success: true };
+  }
+}

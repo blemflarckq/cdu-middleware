@@ -1,0 +1,19 @@
+{
+  "files": [],
+  /*
+  * with these the actual active compiler options is in the references. 
+  * We define it here for shadcn configuration
+  */
+  "references": [ 
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.node.json" }
+  ],
+
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+
+  }
+}
