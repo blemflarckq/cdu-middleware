@@ -67,7 +67,7 @@ export class PatientRecord {
   @Column({ default: 'PENDING' })
   status!: string; // PENDING, BATCHED, PRINTED
 
-  @ManyToOne(() => DispensingBatch, (batch) => batch.patients, {
+  @ManyToOne(() => DispensingBatch, (batch) => batch.patientRecords, {
     nullable: true,
     onDelete: 'SET NULL',
   })

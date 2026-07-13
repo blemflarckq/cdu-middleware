@@ -1,8 +1,9 @@
 import {
   Entity,
-  PrimaryGeneratedColumn,
   Column,
+  PrimaryGeneratedColumn,
   CreateDateColumn,
+  UpdateDateColumn,
   OneToMany,
 } from 'typeorm';
 import { PatientRecord } from './patient-record.entity';
@@ -12,19 +13,31 @@ export class DispensingBatch {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
+  @Column({ nullable: true })
+  name!: string;
+
   @Column()
-  name!: string; // e.g., "Batch - 2026-04-20"
+  startDate!: Date; // Renamed from targetDate
 
-  @Column({ type: 'date' })
-  targetDate!: Date;
+  @Column()
+  endDate!: Date; // New field for range end
 
-  @Column({ default: 'CREATED' }) // CREATED, IN_PROGRESS, COMPLETED
-  status!: string;
+  @Column({ default: 'CREATED' })
+  status!: string; // CREATED, COMPLETED
 
-  // FIX: Define the inverse relationship here
-  @OneToMany(() => PatientRecord, (record) => record.batch)
-  patients!: PatientRecord[];
+  // New fields for repeats
+  @Column({ default: 1 })
+  numberOfRepeats!: number; // Number of bottles to dispense
+
+  @Column({ nullable: true, type: 'text' })
+  dosageInstructions!: string; // Instructions for the patient
+
+  @OneToMany(() => PatientRecord, (patientRecord) => patientRecord.batch)
+  patientRecords!: PatientRecord[];
 
   @CreateDateColumn()
   createdAt!: Date;
+
+  @UpdateDateColumn()
+  updatedAt!: Date;
 }

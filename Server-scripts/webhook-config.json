@@ -1,0 +1,21 @@
+[
+  {
+    "id": "deploy-pharmacy",
+    "execute-command": "C:\\deploy-pharmacy.bat",
+    "command-working-directory": "C:\\pharmacy-logistics",
+    "trigger-rule": {
+      "and": [
+        {
+          "match": {
+            "type": "value",
+            "value": "refs/heads/main",
+            "parameter": {
+              "source": "payload",
+              "name": "ref"
+            }
+          }
+        }
+      ]
+    }
+  }
+]

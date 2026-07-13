@@ -17,6 +17,11 @@ export class DrugPickupPointService {
   private readonly API_BASE_URL =
     'http://api.bonolohealth.gov.ls/api/Ministry%20of%20Health';
 
+  // Cache for pickup points to avoid repeated DB queries
+  private cachedPickupPoints: DrugPickupPoint[] | null = null;
+  private cacheTimestamp: number = 0;
+  private readonly CACHE_TTL = 60000; // 60 seconds
+
   constructor(
     @InjectRepository(DrugPickupPoint)
     private pickupPointRepo: Repository<DrugPickupPoint>,
@@ -42,7 +47,12 @@ export class DrugPickupPointService {
       const pickupPoints = this.parseApiResponse(responseData);
       this.logger.log(`Received ${pickupPoints.length} pickup points from API`);
 
-      return await this.syncPickupPoints(pickupPoints);
+      const synced = await this.syncPickupPoints(pickupPoints);
+
+      // Invalidate cache after sync
+      this.invalidateCache();
+
+      return synced;
     } catch (error) {
       this.logger.error(
         `Failed to fetch from external API: ${(error as Error).message}`,
@@ -145,15 +155,11 @@ export class DrugPickupPointService {
    */
   private parseApiResponse(responseData: any): Partial<DrugPickupPoint>[] {
     try {
-      // The response has a structure: { reference, type, method, body }
-      // where body is a JSON string containing the Locations array
-
       if (!responseData || !responseData.body) {
         this.logger.warn('No body found in API response');
         return [];
       }
 
-      // Parse the body string to get the actual data
       let locationsData;
       try {
         locationsData = JSON.parse(responseData.body);
@@ -162,7 +168,6 @@ export class DrugPickupPointService {
         return [];
       }
 
-      // Extract the Locations array
       let locations: any = [];
       if (locationsData.Locations && Array.isArray(locationsData.Locations)) {
         locations = locationsData.Locations;
@@ -175,10 +180,8 @@ export class DrugPickupPointService {
 
       this.logger.log(`Found ${locations.length} locations in API response`);
 
-      // Map the locations to our PickupPoint structure
       return locations
         .map((location: any) => {
-          // Extract address components
           let address = '';
           if (location.Address) {
             const parts: any = [];
@@ -188,7 +191,6 @@ export class DrugPickupPointService {
             address = parts.join(', ');
           }
 
-          // Extract phone number
           let contactNumber = '';
           if (location.Telephone && location.Telephone.Number) {
             contactNumber = location.Telephone.Number;
@@ -226,18 +228,15 @@ export class DrugPickupPointService {
       });
 
       if (!point) {
-        // Try to find by name (case-insensitive)
         point = await this.pickupPointRepo.findOne({
           where: { name: data.name },
         });
       }
 
       if (point) {
-        // Update existing
         Object.assign(point, data);
         this.logger.debug(`Updating existing pickup point: ${point.name}`);
       } else {
-        // Create new
         point = this.pickupPointRepo.create(data);
         this.logger.debug(`Creating new pickup point: ${point.name}`);
       }
@@ -247,28 +246,67 @@ export class DrugPickupPointService {
     }
 
     this.logger.log(`Synced ${syncedPoints.length} pickup points`);
+
+    // Invalidate cache after sync
+    this.invalidateCache();
+
     return syncedPoints;
   }
 
   /**
-   * Find best matching pickup point by name with prefix bonus
-   * Prioritizes matches where input words appear at the beginning of the point name
+   * Invalidate the cache
    */
-  async findBestMatch(name: string): Promise<DrugPickupPoint | null> {
-    if (!name || name.trim() === '') return null;
+  private invalidateCache(): void {
+    this.cachedPickupPoints = null;
+    this.cacheTimestamp = 0;
+  }
 
-    const allPoints = await this.pickupPointRepo.find();
+  /**
+   * Get all pickup points with caching
+   */
+  private async getCachedPickupPoints(): Promise<DrugPickupPoint[]> {
+    const now = Date.now();
+    if (this.cachedPickupPoints && now - this.cacheTimestamp < this.CACHE_TTL) {
+      return this.cachedPickupPoints;
+    }
+
+    // Cache miss - fetch from database
+    this.cachedPickupPoints = await this.pickupPointRepo.find({
+      order: { name: 'ASC' },
+      where: { isActive: true },
+    });
+    this.cacheTimestamp = now;
+    return this.cachedPickupPoints;
+  }
+
+  /**
+   * Get all pickup points as an array (async)
+   */
+  async getAllPickupPoints(): Promise<DrugPickupPoint[]> {
+    return await this.pickupPointRepo.find({
+      order: { name: 'ASC' },
+      where: { isActive: true },
+    });
+  }
+
+  /**
+   * Find best matching pickup point by name (SYNCHRONOUS)
+   * Uses the provided list of pickup points to match against
+   */
+  findBestMatchSync(
+    name: string,
+    pickupPoints: DrugPickupPoint[],
+  ): DrugPickupPoint | null {
+    if (!name || name.trim() === '') return null;
+    if (!pickupPoints || pickupPoints.length === 0) return null;
+
     const normalizedInput = this.normalizeString(name);
     const inputWords = normalizedInput.split(' ');
-
-    this.logger.debug(
-      `Looking for match: "${name}" -> normalized: "${normalizedInput}"`,
-    );
 
     let bestMatch: DrugPickupPoint | null = null;
     let bestScore = 0;
 
-    for (const point of allPoints) {
+    for (const point of pickupPoints) {
       const normalizedPoint = this.normalizeString(point.name);
       const pointWords = normalizedPoint.split(' ');
 
@@ -278,7 +316,7 @@ export class DrugPickupPointService {
         normalizedPoint,
       );
 
-      // Calculate prefix bonus: how many input words match the beginning of the point name
+      // Calculate prefix bonus
       let prefixMatchCount = 0;
       for (let i = 0; i < inputWords.length && i < pointWords.length; i++) {
         if (
@@ -288,11 +326,10 @@ export class DrugPickupPointService {
         ) {
           prefixMatchCount++;
         } else {
-          break; // Stop at first mismatch
+          break;
         }
       }
 
-      // Calculate prefix ratio and bonus (up to 0.3 extra)
       const prefixRatio =
         inputWords.length > 0 ? prefixMatchCount / inputWords.length : 0;
       const prefixBonus = prefixRatio * 0.3;
@@ -309,16 +346,12 @@ export class DrugPickupPointService {
         collectGoBonus += 0.05;
       }
 
-      // Calculate final score
-      let finalScore = baseScore + prefixBonus + collectGoBonus;
-      finalScore = Math.min(finalScore, 1.0); // Cap at 1.0
-
-      this.logger.debug(
-        `Point: "${point.name}" - Base: ${baseScore.toFixed(3)}, Prefix: ${prefixBonus.toFixed(3)}, Bonus: ${collectGoBonus}, Final: ${finalScore.toFixed(3)}`,
+      const finalScore = Math.min(
+        baseScore + prefixBonus + collectGoBonus,
+        1.0,
       );
 
       if (finalScore > bestScore && finalScore > 0.5) {
-        // 50% threshold
         bestScore = finalScore;
         bestMatch = point;
       }
@@ -328,57 +361,30 @@ export class DrugPickupPointService {
       this.logger.debug(
         `✅ Best match for "${name}" is "${bestMatch.name}" (score: ${bestScore.toFixed(3)})`,
       );
-    } else {
-      this.logger.debug(
-        `❌ No match found for "${name}" (best score: ${bestScore.toFixed(3)})`,
-      );
     }
 
     return bestMatch;
   }
 
   /**
-   * Calculate direct similarity between two strings (Levenshtein-inspired)
-   */
-  private calculateDirectSimilarity(str1: string, str2: string): number {
-    // Check if one string contains the other
-    if (str1.includes(str2) || str2.includes(str1)) {
-      return 0.9;
-    }
-
-    // Simple character-based similarity
-    const maxLen = Math.max(str1.length, str2.length);
-    if (maxLen === 0) return 1;
-
-    // Count matching characters (simple approximation)
-    let matches = 0;
-    for (let i = 0; i < Math.min(str1.length, str2.length); i++) {
-      if (str1[i] === str2[i]) matches++;
-    }
-
-    return matches / maxLen;
-  }
+   * Find best matching pickup point by name (ASYNCHRONOUS - for other use cases)
+   
+  async findBestMatch(name: string): Promise<DrugPickupPoint | null> {
+    return await this.findBestMatchSync(name);
+  }*/
 
   /**
-   * Normalize a string for comparison - preserves meaningful special characters
+   * Normalize a string for comparison
    */
   private normalizeString(str: string): string {
     if (!str) return '';
-
-    // Convert to lowercase
-    const normalized = str
+    return str
       .toLowerCase()
-      // Replace ampersand with 'and' for better matching
       .replace(/&/g, ' and ')
-      // Remove apostrophes
       .replace(/'/g, '')
-      // Replace other special characters with spaces
       .replace(/[^a-z0-9\s]/g, ' ')
-      // Collapse multiple spaces
       .trim()
       .replace(/\s+/g, ' ');
-
-    return normalized;
   }
 
   /**
@@ -392,7 +398,6 @@ export class DrugPickupPointService {
 
     if (words1.length === 0 || words2.length === 0) return 0;
 
-    // Count common words
     let commonWords = 0;
     const wordSet2 = new Set(words2);
 
@@ -400,7 +405,6 @@ export class DrugPickupPointService {
       if (wordSet2.has(word)) {
         commonWords++;
       } else {
-        // Check for partial word matches
         for (const word2 of words2) {
           if (
             word.length > 2 &&
@@ -414,11 +418,8 @@ export class DrugPickupPointService {
       }
     }
 
-    // Use the longer word count as denominator
     const maxLength = Math.max(words1.length, words2.length);
-    const score = commonWords / maxLength;
-
-    return Math.min(score, 1.0);
+    return Math.min(commonWords / maxLength, 1.0);
   }
 
   /**
@@ -452,6 +453,7 @@ export class DrugPickupPointService {
    */
   async create(data: Partial<DrugPickupPoint>): Promise<DrugPickupPoint> {
     const point = this.pickupPointRepo.create(data);
+    this.invalidateCache();
     return await this.pickupPointRepo.save(point);
   }
 
@@ -463,6 +465,7 @@ export class DrugPickupPointService {
     data: Partial<DrugPickupPoint>,
   ): Promise<DrugPickupPoint> {
     await this.pickupPointRepo.update(id, data);
+    this.invalidateCache();
     return await this.pickupPointRepo.findOneOrFail({ where: { id } });
   }
 
@@ -471,6 +474,7 @@ export class DrugPickupPointService {
    */
   async delete(id: string): Promise<void> {
     await this.pickupPointRepo.update(id, { isActive: false });
+    this.invalidateCache();
   }
 
   /**
@@ -478,5 +482,6 @@ export class DrugPickupPointService {
    */
   async hardDelete(id: string): Promise<void> {
     await this.pickupPointRepo.delete(id);
+    this.invalidateCache();
   }
 }

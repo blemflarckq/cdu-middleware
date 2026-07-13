@@ -1,0 +1,68 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: pharmacy_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dev_user
+      POSTGRES_PASSWORD: dev_password
+      POSTGRES_DB: pharmacy_mgmt
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - pharmacy_network
+
+  api:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pharmacy_api
+    restart: unless-stopped
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    ports:
+      - "0.0.0.0:3000:3000"
+    environment:
+      DATABASE_URL: postgresql://dev_user:dev_password@db:5432/pharmacy_mgmt
+      TSC_PRINTER_IP: "192.168.26.43"
+      TSC_PRINTER_PORT: "9100"
+      HP_PRINTER_IP: "192.168.26.41"
+      HP_PRINTER_PORT: "9100"
+      NODE_ENV: production
+    depends_on:
+      - db
+    networks:
+      - pharmacy_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  ui:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: pharmacy_ui
+    restart: unless-stopped
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "0.0.0.0:5173:5173"
+    depends_on:
+      - api
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+      - WDS_SOCKET_PORT=5173
+    stdin_open: true
+    tty: true
+    networks:
+      - pharmacy_network
+
+volumes:
+  postgres_data:
+
+networks:
+  pharmacy_network:
+    driver: bridge

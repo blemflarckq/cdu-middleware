@@ -53,10 +53,19 @@ export class ImportController {
    * Groups pending records into a named batch.
    */
   @Post('create-batch')
-  async createBatch(@Body() body: { targetDate: string; batchName: string }) {
+  async createBatch(@Body() body: { 
+    startDate: string; 
+    endDate: string; 
+    batchName: string; 
+    numberOfRepeats?: number; 
+    dosageInstructions?: string 
+  }) {
     return await this.importService.createBatch(
-      body.targetDate,
+      body.startDate,
+      body.endDate,
       body.batchName,
+      body.numberOfRepeats || 1,
+      body.dosageInstructions || ""
     );
   }
 
@@ -71,6 +80,29 @@ export class ImportController {
   async getBatchRecords(@Param('batchId') batchId: string) {
     return await this.importService.getRecordsByBatch(batchId);
   }
+
+  @Get('batches/all')
+async getAllBatches() {
+  const batches = await this.importService.getAllBatches();
+  return batches || [];
+}
+
+// Get active batches only
+@Get('batches')
+async getActiveBatches() {
+  const batches = await this.importService.getActiveBatches();
+  // Ensure we return an array
+  return batches || [];
+}
+
+
+// Get completed batches only
+@Get('batches/completed')
+async getCompletedBatches() {
+  const batches = await this.importService.getCompletedBatches();
+  // Ensure we return an array
+  return batches || [];
+}
 
   @Post('process-record/:id')
   async processRecord(@Param('id') id: string) {
@@ -89,17 +121,30 @@ export class ImportController {
   }
 
   @Post('scan-to-box')
-  async scanToBox(@Body() body: { barcode: string }) {
-    return await this.importService.scanBagToBox(body.barcode);
+  async scanToBox(@Body() body: { bagBarcode: string }) {
+    return await this.importService.scanBagToBox(body.bagBarcode);
   }
 
-  @Post('close/:boxId')
+  @Post('close-box/:boxId')
   async closeBox(@Param('boxId') boxId: string) {
     return await this.importService.closeBox(boxId);
   }
-  @Get('boxes')
-  async getAllBoxes() {
-    return await this.importService.getAllBoxes();
+ @Post('retry-send-box/:boxId')
+async retrySendBox(@Param('boxId') boxId: string) {
+  return await this.importService.retrySendBox(boxId);
+}
+
+@Get('box-logistics-status/:boxId')
+async getBoxLogisticsStatus(@Param('boxId') boxId: string) {
+  return await this.importService.getBoxLogisticsStatus(boxId);
+}
+  // Get open box for location (or create one)
+@Get('boxes/open')
+  async getOpenBox(@Query('location') location: string) {
+    if (!location) {
+      throw new BadRequestException('Location is required');
+    }
+    return await this.importService.getOrCreateOpenBox(location);
   }
 
   // Get box by ID
@@ -112,12 +157,23 @@ async getBoxById(@Param('id') id: string) {
   return box;
 }
 
-// Get open box for location (or create one)
-@Get('boxes/open')
-  async getOpenBox(@Query('location') location: string) {
-    if (!location) {
-      throw new BadRequestException('Location is required');
-    }
-    return await this.importService.getOrCreateOpenBox(location);
+
+
+  @Get('boxes/open/current')
+async getCurrentOpenBox() {
+  return await this.importService.getCurrentOpenBox();
+}
+
+
+// Get open box for a specific pickup point ID
+@Get('boxes/open/:pickupPointId')
+async getOpenBoxForPickupPoint(@Param('pickupPointId') pickupPointId: string) {
+  return await this.importService.getOpenBoxForPickupPoint(pickupPointId);
+}
+
+ @Get('boxes')
+  async getAllBoxes() {
+    return await this.importService.getAllBoxes();
   }
+
 }

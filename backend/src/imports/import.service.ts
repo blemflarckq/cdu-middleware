@@ -4,7 +4,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull } from 'typeorm';
+import { Repository, IsNull, Between } from 'typeorm';
 import { PatientRecord } from '../entities/patient-record.entity';
 import { DispensingBatch } from '../entities/dispensing-batch.entity';
 import { Bag } from '../entities/bag.entity';
@@ -24,8 +24,8 @@ export interface ImportError {
 
 @Injectable()
 export class ImportService {
-  //logisticsService: any;
   private readonly logger = new Logger(ImportService.name);
+
   constructor(
     private logisticsService: LogisticsService,
 
@@ -46,6 +46,63 @@ export class ImportService {
     private regimenService: RegimenService,
     private pickupPointService: DrugPickupPointService,
   ) {}
+
+  /**
+   * Parse Excel date values (serial numbers) or string dates
+   */
+  private parseExcelDate(value: any): Date | null {
+    if (!value) return null;
+
+    // If it's already a Date object
+    if (value instanceof Date) {
+      return isValid(value) ? value : null;
+    }
+
+    // If it's a number (Excel serial date)
+    if (typeof value === 'number') {
+      // Excel dates start from 1900-01-01 (serial 1)
+      // But Excel incorrectly treats 1900 as leap year, so we need to adjust
+      const excelEpoch = new Date(1899, 11, 30); // 1899-12-30
+      const date = new Date(excelEpoch.getTime() + value * 86400000);
+      return isValid(date) ? date : null;
+    }
+
+    // If it's a string, try to parse it
+    if (typeof value === 'string') {
+      // Try standard date parsing
+      const date = new Date(value);
+      if (isValid(date)) return date;
+
+      // Try DD/MM/YYYY format
+      // eslint-disable-next-line no-useless-escape
+      const parts = value.split(/[\/\-.]/);
+      if (parts.length === 3) {
+        // Try DD/MM/YYYY
+        let d = new Date(
+          parseInt(parts[2]),
+          parseInt(parts[1]) - 1,
+          parseInt(parts[0]),
+        );
+        if (isValid(d)) return d;
+        // Try MM/DD/YYYY
+        d = new Date(
+          parseInt(parts[2]),
+          parseInt(parts[0]) - 1,
+          parseInt(parts[1]),
+        );
+        if (isValid(d)) return d;
+        // Try YYYY/MM/DD
+        d = new Date(
+          parseInt(parts[0]),
+          parseInt(parts[1]) - 1,
+          parseInt(parts[2]),
+        );
+        if (isValid(d)) return d;
+      }
+    }
+
+    return null;
+  }
 
   /**
    * Logic for Step 1: Parsing and Validation
@@ -244,19 +301,54 @@ export class ImportService {
 
       // Check mandatory fields
       const missing: string[] = [];
-      if (patientNameIdx === null || !rowArray[patientNameIdx])
+      if (
+        patientNameIdx === null ||
+        !rowArray[patientNameIdx] ||
+        rowArray[patientNameIdx].toString().trim() === ''
+      )
         missing.push('Patient Name');
       if (prescriptionDateIdx === null || !rowArray[prescriptionDateIdx])
         missing.push('Prescription Date');
-      if (regimenIdx === null || !rowArray[regimenIdx])
+      else {
+        const dateValue = this.parseExcelDate(rowArray[prescriptionDateIdx]);
+        if (!dateValue) missing.push('Prescription Date (invalid format)');
+      }
+      if (
+        regimenIdx === null ||
+        !rowArray[regimenIdx] ||
+        rowArray[regimenIdx].toString().trim() === ''
+      )
         missing.push('Regimen Prescribed');
       if (appointmentDateIdx === null || !rowArray[appointmentDateIdx])
         missing.push('Next Clinical Appointment Date');
-      if (pickupPointIdx === null || !rowArray[pickupPointIdx])
+      else {
+        const dateValue = this.parseExcelDate(rowArray[appointmentDateIdx]);
+        if (!dateValue)
+          missing.push('Next Clinical Appointment Date (invalid format)');
+      }
+
+      // Drug Pickup Point - store the name for later matching in commitRecords
+      const pickupPointName =
+        pickupPointIdx !== null && rowArray[pickupPointIdx] !== undefined
+          ? rowArray[pickupPointIdx].toString().trim()
+          : null;
+
+      if (!pickupPointName || pickupPointName === '') {
         missing.push('Drug Pickup Point');
-      if (primaryContactIdx === null || !rowArray[primaryContactIdx])
+      }
+      // We'll do the actual matching in commitRecords where we can use async/await
+
+      if (
+        primaryContactIdx === null ||
+        !rowArray[primaryContactIdx] ||
+        rowArray[primaryContactIdx].toString().trim() === ''
+      )
         missing.push('Primary Contact');
-      if (locationIdx === null || !rowArray[locationIdx])
+      if (
+        locationIdx === null ||
+        !rowArray[locationIdx] ||
+        rowArray[locationIdx].toString().trim() === ''
+      )
         missing.push('Location');
 
       if (missing.length > 0) {
@@ -281,14 +373,23 @@ export class ImportService {
       const cleanPhone = phoneRaw.replace(/\D/g, '');
       const primaryContact = cleanPhone ? `+266${cleanPhone}` : '';
 
-      const pDate = new Date(rowArray[prescriptionDateIdx!]);
-      const aDate = new Date(rowArray[appointmentDateIdx!]);
+      const pDate = this.parseExcelDate(rowArray[prescriptionDateIdx!]);
+      const aDate = this.parseExcelDate(rowArray[appointmentDateIdx!]);
       let pickupDate =
         nextPickupDateIdx !== null && rowArray[nextPickupDateIdx]
-          ? new Date(rowArray[nextPickupDateIdx])
+          ? this.parseExcelDate(rowArray[nextPickupDateIdx])
           : null;
 
-      if (!isValid(pickupDate) && isValid(pDate) && isValid(aDate)) {
+      if (!pDate || !aDate) {
+        errors.push({
+          line: i + 1,
+          name: fullName || 'Unknown',
+          missing: ['Invalid date format'],
+        });
+        continue;
+      }
+
+      if (!pickupDate || !isValid(pickupDate)) {
         const diff = differenceInDays(aDate, pDate);
         const roundedDiff = Math.round(diff / 30) * 30;
 
@@ -297,17 +398,12 @@ export class ImportService {
         else pickupDate = aDate;
       }
 
-      // Get or create Location (async but we're in sync method - we'll handle in commitRecords)
       const locationName = rowArray[locationIdx!];
-
-      // Parse regimen
       const regimenString = rowArray[regimenIdx!];
       const parsedRegimen =
         this.regimenService.parseRegimenString(regimenString);
 
-      // Get pickup point name
-      const pickupPointName = rowArray[pickupPointIdx!];
-
+      // Store the pickup point name for matching in commitRecords
       staged.push({
         ...metadata,
         firstName,
@@ -320,15 +416,14 @@ export class ImportService {
         nextClinicalAppointmentDate: aDate,
         nextDrugPickupDate: pickupDate,
         drugPickupPoint: pickupPointName,
+        drugPickupPointId: null, // Will be resolved in commitRecords
         location: locationName,
         patientUniqueId: patientIdIdx !== null ? rowArray[patientIdIdx] : null,
         gender: genderIdx !== null ? rowArray[genderIdx] : null,
         address: addressIdx !== null ? rowArray[addressIdx] : null,
         status: 'PENDING',
-        // These will be resolved during commit
         locationId: null,
         regimenId: null,
-        drugPickupPointId: null,
       });
     }
 
@@ -341,6 +436,12 @@ export class ImportService {
    */
   async commitRecords(records: any[]) {
     const resolvedRecords: Array<any> = [];
+
+    // Load all pickup points once for all records
+    const allPickupPoints = await this.pickupPointService.getAllPickupPoints();
+    console.log(
+      `📦 Loaded ${allPickupPoints.length} pickup points for matching`,
+    );
 
     for (const record of records) {
       // Resolve or create Location
@@ -359,20 +460,32 @@ export class ImportService {
         regimenId = regimen?.id || null;
       }
 
-      // Find best matching Pickup Point
+      // 🔧 FIX: Check if user already selected a pickup point from frontend
       let pickupPointId: string | null = null;
-      if (record.drugPickupPoint) {
-        const pickupPoint = await this.pickupPointService.findBestMatch(
+
+      // First, check if the record already has a drugPickupPointId (from frontend selection)
+      if (record.drugPickupPointId) {
+        pickupPointId = record.drugPickupPointId;
+        console.log(`✅ Using user-selected pickup point ID: ${pickupPointId}`);
+      }
+      // If not, try to match using the name
+      else if (record.drugPickupPoint) {
+        const pickupPoint = this.pickupPointService.findBestMatchSync(
           record.drugPickupPoint,
+          allPickupPoints,
         );
         if (pickupPoint) {
           pickupPointId = pickupPoint.id;
           console.log(
-            `Matched "${record.drugPickupPoint}" to pickup point "${pickupPoint.name}"`,
+            `✅ Auto-matched "${record.drugPickupPoint}" to pickup point "${pickupPoint.name}"`,
           );
         } else {
-          console.log(
-            `No match found for pickup point "${record.drugPickupPoint}"`,
+          console.warn(
+            `❌ No match found for pickup point "${record.drugPickupPoint}"`,
+          );
+          // Fail the commit if a pickup point can't be matched and user didn't select one
+          throw new Error(
+            `Drug Pickup Point "${record.drugPickupPoint}" could not be matched. Please check the name or add it to the system.`,
           );
         }
       }
@@ -404,23 +517,48 @@ export class ImportService {
     return await this.patientRepo.update(id, updateData);
   }
 
-  async createBatch(targetDate: string, batchName: string) {
+  async createBatch(
+    startDate: string,
+    endDate: string,
+    batchName: string,
+    numberOfRepeats: number = 1,
+    dosageInstructions: string = '',
+  ) {
+    // Validate date range (max 7 days)
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    const diffDays = Math.ceil(
+      (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24),
+    );
+
+    if (diffDays < 0) {
+      throw new Error('End date must be after start date.');
+    }
+
+    if (diffDays > 7) {
+      throw new Error('Date range cannot exceed 7 days.');
+    }
+
+    // Find records with pickup dates between start and end (inclusive)
     const eligibleRecords = await this.patientRepo.find({
       where: {
-        nextDrugPickupDate: new Date(targetDate),
+        nextDrugPickupDate: Between(start, end),
         status: 'PENDING',
         batch: IsNull(),
       },
     });
 
     if (eligibleRecords.length === 0) {
-      throw new Error('No available records found for this date.');
+      throw new Error('No available records found for this date range.');
     }
 
     const newBatch = this.batchRepo.create({
       name: batchName,
-      targetDate: new Date(targetDate),
+      startDate: start,
+      endDate: end,
       status: 'CREATED',
+      numberOfRepeats: numberOfRepeats,
+      dosageInstructions: dosageInstructions,
     });
     const savedBatch = await this.batchRepo.save(newBatch);
 
@@ -432,23 +570,71 @@ export class ImportService {
     return savedBatch;
   }
 
+  /**
+   * Get all batches (both active and completed)
+   */
+  async getAllBatches(): Promise<DispensingBatch[]> {
+    const batches = await this.batchRepo.find({
+      relations: ['patientRecords'],
+      order: { createdAt: 'DESC' },
+    });
+    return batches || [];
+  }
+
+  /**
+   * Get active batches (CREATED status only)
+   */
+  async getActiveBatches(): Promise<DispensingBatch[]> {
+    const batches = await this.batchRepo.find({
+      where: { status: 'CREATED' },
+      relations: ['patientRecords'],
+      order: { createdAt: 'DESC' },
+    });
+    return batches || [];
+  }
+
+  /**
+   * Get completed batches
+   */
+  async getCompletedBatches(): Promise<DispensingBatch[]> {
+    const batches = await this.batchRepo.find({
+      where: { status: 'COMPLETED' },
+      relations: ['patientRecords'],
+      order: { createdAt: 'DESC' },
+    });
+    return batches || [];
+  }
+
   async processAndPrint(recordId: string) {
     const record = await this.patientRepo.findOne({
       where: { id: recordId },
-      relations: ['drugPickupPointEntity'],
+      relations: ['drugPickupPointEntity', 'batch'],
     });
 
     if (!record) throw new Error('Patient record not found');
 
+    const batch = record.batch;
+    const numberOfRepeats = batch?.numberOfRepeats || 1;
+    const dosageInstructions =
+      batch?.dosageInstructions || 'Take as prescribed';
+
     const bagBarcode = `B${Date.now().toString().slice(-8)}${Math.floor(Math.random() * 100)}`;
 
-    const newBag = this.bagRepo.create({
-      barcode: bagBarcode,
-      patientName: `${record.firstName} ${record.lastName}`,
-      collectionLocation: record.location,
-      status: 'PRINTED',
-      patientRecord: record,
-    });
+    const pickupPointName =
+      record.drugPickupPointEntity?.name ||
+      record.drugPickupPoint ||
+      'Not specified';
+    const pickupPointId = record.drugPickupPointEntity?.id || null;
+
+    // Create bag with proper property names
+    const newBag = new Bag();
+    newBag.barcode = bagBarcode;
+    newBag.patientName = `${record.firstName} ${record.lastName}`;
+    newBag.collectionLocation = pickupPointName;
+    newBag.drugPickupPointId = pickupPointId;
+    newBag.patientRecord = record;
+    newBag.patientRecordId = record.id;
+    newBag.status = 'PRINTED';
 
     await this.bagRepo.save(newBag);
 
@@ -463,11 +649,7 @@ export class ImportService {
       }
     }
 
-    const pickupPointName =
-      record.drugPickupPointEntity?.name ||
-      record.drugPickupPoint ||
-      'Not specified';
-
+    // Print Bag Label
     const bagLabelData = {
       type: 'bag' as const,
       barcode: bagBarcode,
@@ -479,21 +661,40 @@ export class ImportService {
 
     try {
       await this.printService.printBagLabel(bagLabelData);
-      console.log(
+      this.logger.log(
         `✅ Bag label printed for: ${record.firstName} ${record.lastName}`,
       );
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error occurred';
-      console.error(`❌ Failed to print bag label: ${errorMessage}`);
+      this.logger.error(`❌ Failed to print bag label: ${errorMessage}`);
     }
 
-    console.log(
-      `[EPSON - PLACEHOLDER] Printing slip for Location: ${record.location}`,
-    );
-    console.log(
-      `[EPSON] Slip would contain: Patient: ${record.firstName} ${record.lastName}, Regimen: ${record.regimen}`,
-    );
+    // Print Product Labels for each repeat (bottle)
+    for (let i = 1; i <= numberOfRepeats; i++) {
+      const productLabelData = {
+        patientName: `${record.firstName} ${record.lastName}`,
+        regimen: record.regimen,
+        dosageInstructions: dosageInstructions,
+        bottleNumber: i,
+        totalBottles: numberOfRepeats,
+      };
+
+      try {
+        await this.printService.printProductLabel(productLabelData);
+        this.logger.log(
+          `✅ Product label ${i}/${numberOfRepeats} printed for: ${record.firstName} ${record.lastName}`,
+        );
+        // Small delay between labels to prevent printer jamming
+        await this.delay(500);
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error occurred';
+        this.logger.error(
+          `❌ Failed to print product label ${i}: ${errorMessage}`,
+        );
+      }
+    }
 
     record.status = 'PRINTED';
     await this.patientRepo.save(record);
@@ -501,8 +702,14 @@ export class ImportService {
     return {
       success: true,
       bagBarcode,
-      message: `Bag label printed for ${record.firstName} ${record.lastName}`,
+      message: `Bag label and ${numberOfRepeats} product label(s) printed for ${record.firstName} ${record.lastName}`,
+      numberOfRepeats: numberOfRepeats,
     };
+  }
+
+  // Add delay helper
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   async reprintBagLabel(recordId: string) {
@@ -572,46 +779,111 @@ export class ImportService {
     return { success: true, message: 'Batch completed successfully' };
   }
 
-  async scanBagToBox(
-    bagBarcode: string,
-  ): Promise<{ boxNumber: string; location: string; patient: string }> {
+  async scanBagToBox(bagBarcode: string): Promise<{
+    boxNumber: string;
+    location: string;
+    patient: string;
+    isNewBox: boolean;
+  }> {
+    // Find the bag with its drug pickup point relation
     const bag = await this.bagRepo.findOne({
       where: { barcode: bagBarcode },
-      relations: ['patientRecord'],
+      relations: ['patientRecord', 'drugPickupPoint', 'box'],
     });
 
     if (!bag) throw new Error('Bag not found');
 
-    let box = await this.boxRepo.findOne({
-      where: { destinationLocation: bag.collectionLocation, status: 'OPEN' },
-      relations: ['bags'],
-    });
-
-    if (!box) {
-      box = this.boxRepo.create({
-        boxNumber: `BOX-${Date.now().toString().slice(-6)}`,
-        destinationLocation: bag.collectionLocation,
-        status: 'OPEN',
-      });
-      box = await this.boxRepo.save(box);
+    if (bag.status === 'BOXED') {
+      throw new Error(`Bag ${bagBarcode} is already boxed`);
     }
 
-    bag.box = box;
+    // Get the Drug Pickup Point
+    const pickupPoint = bag.drugPickupPoint;
+    const pickupPointId = bag.drugPickupPointId || 'null';
+    const pickupPointName =
+      pickupPoint?.name || bag.collectionLocation || 'Unknown Location';
+
+    const collectionDate = bag.patientRecord?.nextDrugPickupDate
+      ? new Date(bag.patientRecord.nextDrugPickupDate).toLocaleDateString()
+      : new Date().toLocaleDateString();
+
+    // Check if there's an OPEN box for this exact drug pickup point
+    let openBox = await this.boxRepo.findOne({
+      where: {
+        drugPickupPointId: pickupPointId,
+        status: 'OPEN',
+      },
+      relations: ['bags', 'drugPickupPoint'],
+    });
+
+    let isNewBox = false;
+
+    if (!openBox) {
+      await this.closeAllOpenBoxes();
+
+      openBox = this.boxRepo.create({
+        boxNumber: `BOX-${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 1000)}`,
+        drugPickupPointId: pickupPointId,
+        destinationLocation: pickupPointName,
+        collectionDate: collectionDate,
+        status: 'OPEN',
+      });
+      openBox = await this.boxRepo.save(openBox);
+      isNewBox = true;
+      this.logger.log(
+        `Created new box ${openBox.boxNumber} for pickup point: ${pickupPointName}`,
+      );
+    }
+
+    // Add bag to the box
+    bag.box = openBox;
+    bag.boxId = openBox.id;
     bag.status = 'BOXED';
     await this.bagRepo.save(bag);
 
+    this.logger.log(
+      `Bag ${bagBarcode} added to box ${openBox.boxNumber} for ${pickupPointName}`,
+    );
+
     return {
-      boxNumber: box.boxNumber,
-      location: box.destinationLocation,
+      boxNumber: openBox.boxNumber,
+      location: pickupPointName,
       patient: bag.patientName,
+      isNewBox: isNewBox,
     };
   }
 
-  async getActiveBatches() {
-    return await this.batchRepo.find({
-      where: { status: 'CREATED' },
-      order: { createdAt: 'DESC' },
+  /**
+   * Get open box for a specific pickup point ID
+   */
+  async getOpenBoxForPickupPoint(pickupPointId: string): Promise<Box | null> {
+    return await this.boxRepo.findOne({
+      where: {
+        drugPickupPointId: pickupPointId,
+        status: 'OPEN',
+      },
+      relations: ['bags', 'bags.patientRecord', 'drugPickupPoint'],
     });
+  }
+
+  /**
+   * Close all open boxes (called when creating a new box for a different pickup point)
+   */
+  async closeAllOpenBoxes(): Promise<void> {
+    const openBoxes = await this.boxRepo.find({
+      where: { status: 'OPEN' },
+      relations: ['bags'],
+    });
+
+    for (const box of openBoxes) {
+      if (box.bags && box.bags.length > 0) {
+        box.status = 'CLOSED';
+        await this.boxRepo.save(box);
+        this.logger.log(
+          `Auto-closed box ${box.boxNumber} with ${box.bags.length} bags for ${box.destinationLocation}`,
+        );
+      }
+    }
   }
 
   async getRecordsByBatch(batchId: string) {
@@ -622,10 +894,13 @@ export class ImportService {
     });
   }
 
+  /**
+   * Close a box and send to logistics system
+   */
   async closeBox(boxId: string) {
     const box = await this.boxRepo.findOne({
       where: { id: boxId },
-      relations: ['bags', 'bags.patientRecord'],
+      relations: ['bags', 'bags.patientRecord', 'drugPickupPoint'],
     });
 
     if (!box) {
@@ -641,50 +916,38 @@ export class ImportService {
 
     if (bags.length === 0) {
       this.logger.warn(`Box ${box.boxNumber} has no bags, skipping logistics`);
-      return { success: true, message: 'Box closed but no bags to send' };
+      return {
+        success: true,
+        message: 'Box closed but no bags to send',
+        boxNumber: box.boxNumber,
+        bagsCount: 0,
+      };
     }
 
-    // Build customer data for each bag
-    const bagData = bags.map((bag) => {
-      const record = bag.patientRecord;
-      return {
-        bagBarcode: bag.barcode,
-        patient: {
-          ContactNumber: record.primaryContact || '',
-          CustomerExternalReference: record.id,
-          IDNumber: record.patientUniqueId || '',
-          Name: record.firstName,
-          NextCollectionDate:
-            record.nextDrugPickupDate?.toISOString() ||
-            new Date().toISOString(),
-          Surname: record.lastName,
-          Title: record.gender === 'F' ? 'Ms' : 'Mr',
-          DateOfBirth: null,
-          GenderType: record.gender === 'F' ? 'Female' : 'Male',
-          FolderNumber: null,
-        },
-        scheduledDeliveryDate:
-          record.nextDrugPickupDate?.toISOString() || new Date().toISOString(),
+    // 🔥 PRINT BOX LABEL
+    try {
+      const boxLabelData = {
+        type: 'box' as const,
+        barcode: box.boxNumber,
+        collectionDate: box.collectionDate || new Date().toLocaleDateString(),
+        pickupPoint: box.destinationLocation || 'Unknown',
       };
-    });
 
-    // Find location ID (you may need to map this based on your location entity)
-    // eslint-disable-next-line @typescript-eslint/await-thenable
-    const locationId = await this.getLocationIdForBox(box.destinationLocation);
+      await this.printService.printBoxLabel(boxLabelData);
+      this.logger.log(`✅ Box label printed for: ${box.boxNumber}`);
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error occurred';
+      this.logger.error(`❌ Failed to print box label: ${errorMessage}`);
+      // Continue with logistics even if printing fails
+    }
 
     try {
-      // Send to logistics system
-      const result = await this.logisticsService.sendBoxToLogistics(
-        box.boxNumber,
-        locationId,
-        bagData,
-      );
+      // Send to logistics system using the updated service (now expects boxId)
+      const result = await this.logisticsService.sendBoxToLogistics(box.id);
 
       if (result.statusCode === 200) {
-        box.status = 'SENT';
-        box.logisticsReference = `SENT_${new Date().toISOString()}`;
-        await this.boxRepo.save(box);
-
+        // Box status will be updated by the logistics service to SENT
         this.logger.log(`Box ${box.boxNumber} successfully sent to logistics`);
         return {
           success: true,
@@ -699,6 +962,7 @@ export class ImportService {
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error occurred';
       this.logger.error(`Failed to send box to logistics: ${errorMessage}`);
+
       // Box remains CLOSED but not SENT - can retry later
       return {
         success: false,
@@ -707,6 +971,46 @@ export class ImportService {
         bagsCount: bags.length,
       };
     }
+  }
+
+  /**
+   * Retry sending a failed box to logistics
+   */
+  async retrySendBox(boxId: string): Promise<unknown> {
+    const box = await this.boxRepo.findOne({
+      where: { id: boxId },
+    });
+
+    if (!box) {
+      throw new Error('Box not found');
+    }
+
+    this.logger.log(`Retrying failed box ${box.boxNumber}`);
+
+    const retryResult: unknown =
+      await this.logisticsService.retryFailedBox(boxId);
+    return retryResult;
+  }
+
+  /**
+   * Get box logistics status
+   */
+  async getBoxLogisticsStatus(boxId: string): Promise<unknown> {
+    const status: unknown =
+      await this.logisticsService.getBoxLogisticsStatus(boxId);
+    return status;
+  }
+
+  /**
+   * Get the current open box (first OPEN box found)
+   * In a real scenario, there should only be one open box at a time
+   */
+  async getCurrentOpenBox(): Promise<Box | null> {
+    return await this.boxRepo.findOne({
+      where: { status: 'OPEN' },
+      relations: ['bags', 'bags.patientRecord', 'drugPickupPoint'],
+      order: { createdAt: 'DESC' },
+    });
   }
 
   /**
@@ -728,10 +1032,16 @@ export class ImportService {
 
   // Get all boxes
   async getAllBoxes(): Promise<Box[]> {
-    return await this.boxRepo.find({
-      relations: ['bags', 'bags.patientRecord'],
+    const boxes = await this.boxRepo.find({
+      relations: ['bags', 'bags.patientRecord', 'drugPickupPoint'],
       order: { createdAt: 'DESC' },
     });
+
+    // Ensure logisticsStatus is included
+    return boxes.map((box) => ({
+      ...box,
+      logisticsStatus: box.logisticsStatus || 'PENDING',
+    }));
   }
 
   // Get box by ID - returns Box or null

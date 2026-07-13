@@ -1,14 +1,15 @@
 import {
   Entity,
-  PrimaryGeneratedColumn,
   Column,
-  OneToOne,
-  JoinColumn,
+  PrimaryGeneratedColumn,
   CreateDateColumn,
+  UpdateDateColumn,
   ManyToOne,
+  JoinColumn,
 } from 'typeorm';
 import { PatientRecord } from './patient-record.entity';
 import { Box } from './box.entity';
+import { DrugPickupPoint } from './drug-pickup-point.entity';
 
 @Entity('bags')
 export class Bag {
@@ -16,7 +17,7 @@ export class Bag {
   id!: string;
 
   @Column({ unique: true })
-  barcode!: string; // "BAG-" + unique serial
+  barcode!: string;
 
   @Column()
   patientName!: string;
@@ -24,16 +25,33 @@ export class Bag {
   @Column()
   collectionLocation!: string;
 
-  @Column({ default: 'PRINTED' }) // PRINTED, BOXED, DISPATCHED
+  @Column({ nullable: true })
+  drugPickupPointId!: string | null;
+
+  @ManyToOne(() => DrugPickupPoint)
+  @JoinColumn({ name: 'drugPickupPointId' })
+  drugPickupPoint!: DrugPickupPoint;
+
+  @Column({ default: 'PRINTED' })
   status!: string;
 
-  @OneToOne(() => PatientRecord)
-  @JoinColumn()
+  @ManyToOne(() => PatientRecord)
+  @JoinColumn({ name: 'patientRecordId' })
   patientRecord!: PatientRecord;
 
+  @Column()
+  patientRecordId!: string;
+
   @ManyToOne(() => Box, (box) => box.bags)
+  @JoinColumn({ name: 'boxId' })
   box!: Box;
+
+  @Column({ nullable: true })
+  boxId?: string;
 
   @CreateDateColumn()
   createdAt!: Date;
+
+  @UpdateDateColumn()
+  updatedAt!: Date;
 }

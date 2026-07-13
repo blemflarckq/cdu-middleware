@@ -1,0 +1,5 @@
+# Download nssm from: https://nssm.cc/download
+C:\nssm\nssm.exe install PharmacyPollingService "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+C:\nssm\nssm.exe set PharmacyPollingService AppParameters "-ExecutionPolicy Bypass -File C:\pharmacy-poll.ps1"
+C:\nssm\nssm.exe set PharmacyPollingService Start SERVICE_AUTO_START
+net start PharmacyPollingService
