@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { AlertCircle, CheckCircle2, XCircle, ChevronDown, Check } from "lucide-react";
+import { AlertCircle, CheckCircle2, XCircle, Check } from "lucide-react";
 import { toast } from "sonner";
 
 interface StagedResult {
@@ -50,33 +50,43 @@ export function ImportView({ onCommitSuccess }: ImportViewProps) {
   const handleFileParsed = (validationResult: { staged: any[], errors: any[] }) => {
     console.log('Received validation result from FileUploader:', validationResult);
     setResults(validationResult);
-    
-    // Initialize selected pickup points for each staged record
+
+    // Initialize selections from what the backend matched during validation
     const initialSelections: Record<number, string> = {};
     validationResult.staged.forEach((record, index) => {
-      // If the record already has a drugPickupPointId (from backend matching), pre-select it
       if (record.drugPickupPointId) {
         initialSelections[index] = record.drugPickupPointId;
       }
     });
     setSelectedPickupPoints(initialSelections);
 
-    // Show feedback
-    if (validationResult.errors?.length > 0) {
+    // Show feedback based on match status
+    const matched = validationResult.staged.filter(
+      (r: any) => r.pickupPointMatchStatus === 'matched'
+    ).length;
+    const unmatched = validationResult.staged.filter(
+      (r: any) => r.pickupPointMatchStatus === 'unmatched'
+    ).length;
+
+    if (unmatched > 0) {
+      toast.warning("Validation Complete", {
+        description: `${matched} matched, ${unmatched} need pickup point assignment.`,
+      });
+    } else if (validationResult.errors?.length > 0) {
       toast.warning("Validation Complete with Errors", {
-        description: `${validationResult.staged.length} valid, ${validationResult.errors.length} rows with issues.`
+        description: `${matched} matched, ${validationResult.errors.length} rows skipped.`,
       });
     } else {
       toast.success("Validation Complete", {
-        description: `${validationResult.staged.length} records ready for import.`
+        description: `All ${matched} records matched successfully.`,
       });
     }
   };
 
   const handlePickupPointChange = (index: number, pickupPointId: string) => {
-    setSelectedPickupPoints(prev => ({
+    setSelectedPickupPoints((prev) => ({
       ...prev,
-      [index]: pickupPointId
+      [index]: pickupPointId,
     }));
   };
 
@@ -93,11 +103,10 @@ export function ImportView({ onCommitSuccess }: ImportViewProps) {
 
   const handleConfirmImport = async () => {
     if (!results) return;
-    
-    // Check if all records have a pickup point selected
+
     if (!allRecordsHavePickupPoints()) {
-      toast.error("Error", { 
-        description: "Please select a Drug Pickup Point for ALL records before committing." 
+      toast.error("Error", {
+        description: "Please select a Drug Pickup Point for ALL records before committing.",
       });
       return;
     }
@@ -105,12 +114,18 @@ export function ImportView({ onCommitSuccess }: ImportViewProps) {
     // Build the commit data with selected pickup points
     const recordsWithPickupPoints = results.staged.map((record, index) => ({
       ...record,
-      drugPickupPointId: selectedPickupPoints[index]
+      drugPickupPointId: selectedPickupPoints[index],
     }));
+
+    console.log('Committing records with pickup points:', recordsWithPickupPoints.map((r) => ({
+      name: r.firstName,
+      drugPickupPoint: r.drugPickupPoint,
+      drugPickupPointId: r.drugPickupPointId,
+    })));
 
     setIsCommitting(true);
     const loadingToast = toast.loading("Importing records...");
-    
+
     try {
       const res = await fetch("http://localhost:3000/imports/commit", {
         method: "POST",
@@ -122,7 +137,7 @@ export function ImportView({ onCommitSuccess }: ImportViewProps) {
 
       if (res.ok) {
         toast.success("Import Successful", {
-          description: `${results.staged.length} records saved.`
+          description: `${results.staged.length} records saved.`,
         });
         setResults(null);
         setSelectedPickupPoints({});
@@ -133,13 +148,13 @@ export function ImportView({ onCommitSuccess }: ImportViewProps) {
       } else {
         const error = await res.json();
         toast.error("Import Failed", {
-          description: error.message || "Could not save records to database."
+          description: error.message || "Could not save records to database.",
         });
       }
     } catch (error) {
       toast.dismiss(loadingToast);
       toast.error("Import Failed", {
-        description: "An unexpected error occurred."
+        description: "An unexpected error occurred.",
       });
     } finally {
       setIsCommitting(false);
@@ -148,14 +163,14 @@ export function ImportView({ onCommitSuccess }: ImportViewProps) {
 
   // Get the name of a pickup point by ID
   const getPickupPointName = (id: string) => {
-    const point = pickupPoints.find(p => p.id === id);
+    const point = pickupPoints.find((p) => p.id === id);
     return point?.name || 'Unknown';
   };
 
-  // Check if a record already had a match from backend
-  const hadBackendMatch = (record: any) => {
-    return !!record.drugPickupPointId;
-  };
+  // Count unmatched records
+  const unmatchedCount = results
+    ? results.staged.filter((_, i) => !hasValidPickupPoint(i)).length
+    : 0;
 
   return (
     <div className="space-y-6">
@@ -173,33 +188,51 @@ export function ImportView({ onCommitSuccess }: ImportViewProps) {
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-sm text-slate-500">
-                  Pickup Points: 
-                  <span className={`ml-1 font-medium ${allRecordsHavePickupPoints() ? 'text-green-600' : 'text-yellow-600'}`}>
-                    {allRecordsHavePickupPoints() ? '✅ All assigned' : `⚠️ ${results.staged.filter((_, i) => !hasValidPickupPoint(i)).length} missing`}
+                  Pickup Points:
+                  <span
+                    className={`ml-1 font-medium ${
+                      unmatchedCount === 0 ? 'text-green-600' : 'text-yellow-600'
+                    }`}
+                  >
+                    {unmatchedCount === 0
+                      ? '✅ All assigned'
+                      : `⚠️ ${unmatchedCount} missing`}
                   </span>
                 </span>
               </div>
+              {results.errors.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-red-500">
+                    {results.errors.length} rows skipped
+                  </span>
+                </div>
+              )}
             </div>
             <div className="flex gap-2">
-              <Button variant="outline" onClick={() => setResults(null)}>Cancel</Button>
-              <Button 
-                onClick={handleConfirmImport} 
+              <Button variant="outline" onClick={() => setResults(null)}>
+                Cancel
+              </Button>
+              <Button
+                onClick={handleConfirmImport}
                 className="bg-green-700 hover:bg-green-800"
                 disabled={isCommitting || !allRecordsHavePickupPoints()}
               >
-                {isCommitting ? "Importing..." : `Commit ${results.staged.length} Records`}
+                {isCommitting
+                  ? 'Importing...'
+                  : `Commit ${results.staged.length} Records`}
               </Button>
             </div>
           </div>
 
-          {/* Success / Staging Table */}
+          {/* Staging Table */}
           <Card className="border-green-200 bg-green-50/30">
             <CardHeader>
               <CardTitle className="text-green-800 flex items-center gap-2 text-lg">
-                <CheckCircle2 className="w-5 h-5" /> Review & Assign Pickup Points
+                <CheckCircle2 className="w-5 h-5" /> Review & Confirm Pickup Points
               </CardTitle>
               <p className="text-sm text-green-600">
-                Records with pickup points already matched are shown in green. Please select a pickup point for any records with warnings.
+                Records with matched pickup points are shown in green. Records that couldn't be
+                matched are highlighted in yellow — please select the correct pickup point.
               </p>
             </CardHeader>
             <CardContent>
@@ -207,45 +240,62 @@ export function ImportView({ onCommitSuccess }: ImportViewProps) {
                 <Table>
                   <TableHeader className="sticky top-0 bg-slate-50 z-10">
                     <TableRow>
-                      <TableHead className="w-[20px]">#</TableHead>
+                      <TableHead className="w-[30px]"></TableHead>
                       <TableHead>First Name</TableHead>
                       <TableHead>Last Name</TableHead>
                       <TableHead>Regimen</TableHead>
                       <TableHead>Contact</TableHead>
                       <TableHead className="text-blue-600 font-bold">Next Pickup</TableHead>
-                      <TableHead className="min-w-[220px]">Drug Pickup Point</TableHead>
+                      <TableHead className="min-w-[240px]">Drug Pickup Point</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {results.staged.map((r, index) => {
-                      const isMatched = hadBackendMatch(r) || hasValidPickupPoint(index);
-                      const selectedName = selectedPickupPoints[index] ? getPickupPointName(selectedPickupPoints[index]) : '';
-                      
+                      const isBackendMatched = r.pickupPointMatchStatus === 'matched';
+                      const hasSelection = !!selectedPickupPoints[index];
+                      const isUserOverridden =
+                        hasSelection && selectedPickupPoints[index] !== r.drugPickupPointId;
+                      const needsAttention = !hasSelection;
+
                       return (
-                        <TableRow 
-                          key={index} 
-                          className={!isMatched ? 'border-l-4 border-l-yellow-400 bg-yellow-50/30' : ''}
+                        <TableRow
+                          key={index}
+                          className={needsAttention ? 'border-l-4 border-l-yellow-400 bg-yellow-50/30' : ''}
                         >
+                          {/* Status icon */}
                           <TableCell className="text-center">
-                            {isMatched ? (
+                            {isBackendMatched && !isUserOverridden ? (
                               <Check className="w-4 h-4 text-green-600" />
-                            ) : (
+                            ) : needsAttention ? (
                               <AlertCircle className="w-4 h-4 text-yellow-500" />
+                            ) : (
+                              <Check className="w-4 h-4 text-blue-600" />
                             )}
                           </TableCell>
+
                           <TableCell className="font-medium">{r.firstName}</TableCell>
                           <TableCell>{r.lastName}</TableCell>
                           <TableCell className="text-xs">{r.regimen}</TableCell>
                           <TableCell>{r.primaryContact}</TableCell>
-                          <TableCell className="font-mono text-blue-700">{r.nextDrugPickupDate}</TableCell>
+                          <TableCell className="font-mono text-blue-700">
+                            {r.nextDrugPickupDate}
+                          </TableCell>
+
+                          {/* Pickup Point Cell */}
                           <TableCell>
                             <div className="space-y-1">
                               <Select
                                 value={selectedPickupPoints[index] || ''}
                                 onValueChange={(value) => handlePickupPointChange(index, value)}
                               >
-                                <SelectTrigger 
-                                  className={`w-full ${!isMatched ? 'border-yellow-400 bg-yellow-50 focus:ring-yellow-500' : 'border-green-300 bg-green-50'}`}
+                                <SelectTrigger
+                                  className={`w-full ${
+                                    needsAttention
+                                      ? 'border-yellow-400 bg-yellow-50 focus:ring-yellow-500'
+                                      : isBackendMatched && !isUserOverridden
+                                        ? 'border-green-300 bg-green-50'
+                                        : 'border-blue-300 bg-blue-50'
+                                  }`}
                                 >
                                   <SelectValue placeholder="Select pickup point..." />
                                 </SelectTrigger>
@@ -257,26 +307,31 @@ export function ImportView({ onCommitSuccess }: ImportViewProps) {
                                   ))}
                                 </SelectContent>
                               </Select>
-                              
-                              <div className="flex items-center justify-between">
-                                {/* Show the original name from the file */}
+
+                              {/* Status line */}
+                              <div className="flex items-center justify-between text-xs">
                                 {r.drugPickupPoint && (
-                                  <p className="text-xs text-slate-400 truncate max-w-[180px]">
+                                  <span
+                                    className="text-slate-400 truncate max-w-[180px]"
+                                    title={r.drugPickupPoint}
+                                  >
                                     📄 From file: {r.drugPickupPoint}
-                                  </p>
-                                )}
-                                
-                                {/* Show match status */}
-                                {selectedPickupPoints[index] && (
-                                  <span className="text-xs text-green-600 font-medium flex items-center gap-1">
-                                    <CheckCircle2 className="w-3 h-3" />
-                                    {r.drugPickupPoint ? 'Matched' : 'Assigned'}
                                   </span>
                                 )}
-                                {!selectedPickupPoints[index] && (
-                                  <span className="text-xs text-yellow-600 font-medium flex items-center gap-1">
-                                    <AlertCircle className="w-3 h-3" />
-                                    Required
+
+                                {isBackendMatched && !isUserOverridden && (
+                                  <span className="text-green-600 font-medium flex items-center gap-1">
+                                    <CheckCircle2 className="w-3 h-3" /> Matched
+                                  </span>
+                                )}
+                                {isUserOverridden && (
+                                  <span className="text-blue-600 font-medium flex items-center gap-1">
+                                    <CheckCircle2 className="w-3 h-3" /> Manually set
+                                  </span>
+                                )}
+                                {needsAttention && (
+                                  <span className="text-yellow-600 font-medium flex items-center gap-1">
+                                    <AlertCircle className="w-3 h-3" /> Required
                                   </span>
                                 )}
                               </div>
@@ -298,7 +353,9 @@ export function ImportView({ onCommitSuccess }: ImportViewProps) {
                 <CardTitle className="text-red-800 flex items-center gap-2 text-md">
                   <XCircle className="w-5 h-5" /> Skipped Rows ({results.errors.length})
                 </CardTitle>
-                <p className="text-sm text-red-600">The following rows are missing mandatory fields and will not be imported.</p>
+                <p className="text-sm text-red-600">
+                  The following rows are missing mandatory fields and will not be imported.
+                </p>
               </CardHeader>
               <CardContent>
                 <div className="max-h-40 overflow-y-auto rounded-md border bg-white">
@@ -306,9 +363,15 @@ export function ImportView({ onCommitSuccess }: ImportViewProps) {
                     <TableBody>
                       {results.errors.map((err, i) => (
                         <TableRow key={i}>
-                          <TableCell className="text-xs font-bold text-red-500">Line {err.line}</TableCell>
-                          <TableCell className="text-xs">{err.name || "Unknown Patient"}</TableCell>
-                          <TableCell className="text-xs text-slate-500 italic">Missing: {err.missing.join(", ")}</TableCell>
+                          <TableCell className="text-xs font-bold text-red-500">
+                            Line {err.line}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {err.name || 'Unknown Patient'}
+                          </TableCell>
+                          <TableCell className="text-xs text-slate-500 italic">
+                            Missing: {err.missing.join(', ')}
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>

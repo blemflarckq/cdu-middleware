@@ -13,7 +13,7 @@ export class ImportController {
    * It transforms the CSV JSON into our domain logic (names, dates, phones).
    */
   @Post('validate')
-  validate(@Body() body: { rows: any[] }) {
+  async validate(@Body() body: { rows: any[] }) {
     // No 'await' because validateImport is synchronous in the service
     return this.importService.validateImport(body.rows);
   }

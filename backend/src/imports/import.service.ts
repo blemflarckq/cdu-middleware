@@ -107,7 +107,7 @@ export class ImportService {
   /**
    * Logic for Step 1: Parsing and Validation
    */
-  validateImport(rows: any[]) {
+  async validateImport(rows: any[]) {
     console.log('========== FULL DATA DUMP ==========');
     console.log(`Total rows received: ${rows.length}`);
     console.log('=====================================');
@@ -229,7 +229,13 @@ export class ImportService {
     const staged: any[] = [];
     const errors: ImportError[] = [];
 
-    // STEP 4: Process data rows
+    // 🔧 STEP 4: Pre-load all pickup points for matching
+    const allPickupPoints = await this.pickupPointService.getAllPickupPoints();
+    console.log(
+      `📦 Loaded ${allPickupPoints.length} pickup points for matching`,
+    );
+
+    // STEP 5: Process data rows
     for (let i = dataStartIndex; i < rows.length; i++) {
       const rowArray = rows[i];
       if (!rowArray || !Array.isArray(rowArray)) continue;
@@ -403,6 +409,34 @@ export class ImportService {
       const parsedRegimen =
         this.regimenService.parseRegimenString(regimenString);
 
+      // 🔧 STEP 6: Match pickup point DURING validation
+      const pickupPointNameFromFile =
+        pickupPointIdx !== null && rowArray[pickupPointIdx]
+          ? rowArray[pickupPointIdx].toString().trim()
+          : null;
+
+      let matchedPickupPoint: ReturnType<
+        DrugPickupPointService['findBestMatchSync']
+      > = null;
+      let pickupPointMatchStatus = 'unmatched';
+
+      if (pickupPointNameFromFile) {
+        matchedPickupPoint = this.pickupPointService.findBestMatchSync(
+          pickupPointNameFromFile,
+          allPickupPoints,
+        );
+
+        if (matchedPickupPoint) {
+          pickupPointMatchStatus = 'matched';
+          console.log(
+            `✅ Matched "${pickupPointNameFromFile}" → "${matchedPickupPoint.name}"`,
+          );
+        } else {
+          pickupPointMatchStatus = 'unmatched';
+          console.log(`❌ No match for "${pickupPointNameFromFile}"`);
+        }
+      }
+
       // Store the pickup point name for matching in commitRecords
       staged.push({
         ...metadata,
@@ -415,8 +449,14 @@ export class ImportService {
         regimenFullName: parsedRegimen?.fullName || null,
         nextClinicalAppointmentDate: aDate,
         nextDrugPickupDate: pickupDate,
-        drugPickupPoint: pickupPointName,
-        drugPickupPointId: null, // Will be resolved in commitRecords
+        // Original string from file
+        drugPickupPoint: pickupPointNameFromFile,
+        // ✅ New: matched pickup point from backend
+        drugPickupPointId: matchedPickupPoint?.id || null,
+        // ✅ New: match status for frontend
+        pickupPointMatchStatus: pickupPointMatchStatus,
+        // ✅ New: matched name for display
+        matchedPickupPointName: matchedPickupPoint?.name || null,
         location: locationName,
         patientUniqueId: patientIdIdx !== null ? rowArray[patientIdIdx] : null,
         gender: genderIdx !== null ? rowArray[genderIdx] : null,
@@ -437,12 +477,6 @@ export class ImportService {
   async commitRecords(records: any[]) {
     const resolvedRecords: Array<any> = [];
 
-    // Load all pickup points once for all records
-    const allPickupPoints = await this.pickupPointService.getAllPickupPoints();
-    console.log(
-      `📦 Loaded ${allPickupPoints.length} pickup points for matching`,
-    );
-
     for (const record of records) {
       // Resolve or create Location
       let locationId: string | null = null;
@@ -460,34 +494,14 @@ export class ImportService {
         regimenId = regimen?.id || null;
       }
 
-      // 🔧 FIX: Check if user already selected a pickup point from frontend
-      let pickupPointId: string | null = null;
+      // 🔧 Pickup point ID comes directly from the frontend
+      // (which received it from validation and the user may have overridden it)
+      const pickupPointId = record.drugPickupPointId || null;
 
-      // First, check if the record already has a drugPickupPointId (from frontend selection)
-      if (record.drugPickupPointId) {
-        pickupPointId = record.drugPickupPointId;
-        console.log(`✅ Using user-selected pickup point ID: ${pickupPointId}`);
-      }
-      // If not, try to match using the name
-      else if (record.drugPickupPoint) {
-        const pickupPoint = this.pickupPointService.findBestMatchSync(
-          record.drugPickupPoint,
-          allPickupPoints,
+      if (!pickupPointId) {
+        throw new Error(
+          `Drug Pickup Point "${record.drugPickupPoint || 'unknown'}" has not been assigned. Please select a pickup point before committing.`,
         );
-        if (pickupPoint) {
-          pickupPointId = pickupPoint.id;
-          console.log(
-            `✅ Auto-matched "${record.drugPickupPoint}" to pickup point "${pickupPoint.name}"`,
-          );
-        } else {
-          console.warn(
-            `❌ No match found for pickup point "${record.drugPickupPoint}"`,
-          );
-          // Fail the commit if a pickup point can't be matched and user didn't select one
-          throw new Error(
-            `Drug Pickup Point "${record.drugPickupPoint}" could not be matched. Please check the name or add it to the system.`,
-          );
-        }
       }
 
       resolvedRecords.push({
