@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 //import { AppController } from './app.controller';
 //import { AppService } from './app.service';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { ImportsModule } from './imports/imports.module';
+import { ImportModule } from './imports/imports.module';
 //import { PatientRecord } from './entities/patient-record.entity';
 //import { DispensingBatch } from './entities/dispensing-batch.entity';
 //import { Bag } from './entities/bag.entity';
@@ -22,7 +22,7 @@ import { ImportsModule } from './imports/imports.module';
       autoLoadEntities: true,
       synchronize: true, // Auto-creates tables in dev; perfect for this project
     }),
-    ImportsModule,
+    ImportModule,
   ],
   //controllers: [AppController],
   //providers: [AppService],
