@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { ScanBarcode, Package, Send, AlertCircle, RefreshCw } from 'lucide-react';
+import { ScanBarcode, Package, Send, AlertCircle, RefreshCw, FileText } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface Bag {
@@ -28,7 +28,7 @@ interface Box {
   destinationLocation: string;
   collectionDate: string;
   status: 'OPEN' | 'CLOSED' | 'SENT';
-  logisticsStatus?: 'PENDING' | 'PROCESSING' | 'SENT' | 'FAILED' | 'RETRYING' | 'PENDING_CONFIRMATION';
+  logisticsStatus?: string;
   bags: Bag[];
   createdAt: string;
   updatedAt: string;
@@ -43,18 +43,12 @@ export function BoxingStation() {
 
   const isMounted = useRef(true);
 
-  // Fetch all boxes
   const fetchBoxes = useCallback(async () => {
     if (!isMounted.current) return;
-
-    console.log("🔵 fetchBoxes: Starting...");
-    
     try {
       const res = await fetch('http://localhost:3000/imports/boxes');
       if (res.ok) {
         const data = await res.json();
-        console.log("🔵 Boxes data:", data);
-        console.log("🔵 First box logisticsStatus:", data[0]?.logisticsStatus);
         if (isMounted.current) {
           setBoxes(data);
         }
@@ -64,17 +58,14 @@ export function BoxingStation() {
     }
   }, []);
 
-  // Fetch current open box
   const fetchCurrentOpenBox = useCallback(async () => {
     if (!isMounted.current) return;
-    
     try {
       const res = await fetch('http://localhost:3000/imports/boxes/open/current');
       if (res.ok) {
         const data = await res.json();
         if (isMounted.current && data && data.id) {
           setCurrentBox(data);
-          console.log('Current open box loaded:', data);
         } else if (isMounted.current) {
           setCurrentBox(null);
         }
@@ -90,23 +81,21 @@ export function BoxingStation() {
       }
     }
   }, []);
-  
-  // Refresh all data
+
   const refreshData = useCallback(async () => {
     setRefreshing(true);
     await Promise.all([fetchBoxes(), fetchCurrentOpenBox()]);
     setRefreshing(false);
   }, [fetchBoxes, fetchCurrentOpenBox]);
 
-  // Initial load
   useEffect(() => {
     isMounted.current = true;
-    console.log('isMounted from useEffect at render is:', isMounted.current);
     refreshData();
-    return () => { isMounted.current = false; };
+    return () => {
+      isMounted.current = false;
+    };
   }, [refreshData]);
 
-  // Scan bag barcode
   const handleScanBag = async () => {
     if (!scanInput.trim()) {
       toast.error('Error', { description: 'Please scan a bag barcode' });
@@ -125,11 +114,11 @@ export function BoxingStation() {
 
       if (res.ok) {
         toast.success(result.isNewBox ? 'New Box Created' : 'Bag Scanned', {
-          description: result.isNewBox 
+          description: result.isNewBox
             ? `New box ${result.boxNumber} created for ${result.location}`
             : `${result.patient} added to box ${result.boxNumber}`,
         });
-        
+
         await refreshData();
         setScanInput('');
       } else {
@@ -143,7 +132,6 @@ export function BoxingStation() {
     }
   };
 
-  // Close current box
   const handleCloseBox = async () => {
     if (!currentBox) return;
 
@@ -159,7 +147,6 @@ export function BoxingStation() {
         toast.success('Box Closed', {
           description: result.message || `Box ${currentBox.boxNumber} closed successfully`,
         });
-        
         await refreshData();
       } else {
         toast.error('Failed to Close Box', {
@@ -174,24 +161,23 @@ export function BoxingStation() {
     }
   };
 
-  // Retry sending failed box
   const handleRetrySend = async (boxId: string) => {
     setLoading(true);
     try {
       const res = await fetch(`http://localhost:3000/imports/retry-send-box/${boxId}`, {
         method: 'POST',
       });
-      
+
       const result = await res.json();
-      
+
       if (res.ok && result.success) {
         toast.success('Retry Initiated', {
-          description: `Box ${result.boxNumber} is being resent to logistics.`
+          description: `Box ${result.boxNumber} is being resent to logistics.`,
         });
         await refreshData();
       } else {
         toast.error('Retry Failed', {
-          description: result.message || 'Could not resend box to logistics'
+          description: result.message || 'Could not resend box to logistics',
         });
       }
     } catch (error) {
@@ -202,33 +188,37 @@ export function BoxingStation() {
     }
   };
 
-  const handleReprintBoxLabel = async (boxId: string, boxNumber: string) => {
-  setLoading(true);
-  try {
-    const res = await fetch(`http://localhost:3000/print/reprint-box-label/${boxId}`, {
-      method: 'POST',
-    });
-    
-    const result = await res.json();
-    
-    if (res.ok && result.success) {
-      toast.success('Box Label Reprint', {
-        description: `Box label for ${result.boxNumber} has been sent to printer.`
-      });
-    } else {
-      toast.error('Reprint Failed', {
-        description: result.message || 'Could not reprint box label'
-      });
-    }
-  } catch (error) {
-    console.error('Reprint error:', error);
-    toast.error('Error', { description: 'Network error occurred' });
-  } finally {
-    setLoading(false);
-  }
-};
+  // 🔥 NEW: Print Manifest handler
+  const handlePrintManifest = async (boxId: string, boxNumber: string) => {
+    setLoading(true);
+    const loadingToast = toast.loading(`Printing manifest for ${boxNumber}...`);
 
-  // Get status badge
+    try {
+      const res = await fetch(`http://localhost:3000/imports/print-manifest/${boxId}`, {
+        method: 'POST',
+      });
+
+      const result = await res.json();
+      toast.dismiss(loadingToast);
+
+      if (res.ok && result.success) {
+        toast.success('Manifest Printed', {
+          description: result.message || `Manifest sent to printer for ${boxNumber}`,
+        });
+      } else {
+        toast.error('Print Failed', {
+          description: result.message || 'Could not print manifest',
+        });
+      }
+    } catch (error) {
+      toast.dismiss(loadingToast);
+      console.error('Print manifest error:', error);
+      toast.error('Error', { description: 'Network error occurred' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'OPEN':
@@ -242,7 +232,6 @@ export function BoxingStation() {
     }
   };
 
-  // Get logistics status badge
   const getLogisticsStatusBadge = (status: string | undefined) => {
     switch (status) {
       case 'FAILED':
@@ -271,7 +260,7 @@ export function BoxingStation() {
       </div>
 
       {/* Current Active Box Section */}
-      <Card className={currentBox ? "border-blue-200 bg-blue-50/30" : "border-dashed border-2 bg-slate-50"}>
+      <Card className={currentBox ? 'border-blue-200 bg-blue-50/30' : 'border-dashed border-2 bg-slate-50'}>
         <CardHeader className="flex flex-row items-center justify-between">
           <div>
             <CardTitle className="flex items-center gap-2">
@@ -280,9 +269,8 @@ export function BoxingStation() {
             </CardTitle>
             {currentBox && (
               <p className="text-sm text-slate-600 mt-1">
-                Destination: {currentBox.destinationLocation} | 
-                Collection Date: {currentBox.collectionDate} | 
-                Bags: {currentBox.bags?.length || 0}
+                Destination: {currentBox.destinationLocation} | Collection Date:{' '}
+                {currentBox.collectionDate} | Bags: {currentBox.bags?.length || 0}
               </p>
             )}
           </div>
@@ -295,7 +283,6 @@ export function BoxingStation() {
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
-            {/* Scan Input */}
             <div className="flex gap-2">
               <Input
                 placeholder="Scan or enter bag barcode"
@@ -311,15 +298,15 @@ export function BoxingStation() {
               </Button>
             </div>
 
-            {/* Info message when no active box */}
             {!currentBox && (
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-center">
                 <AlertCircle className="w-8 h-8 text-blue-500 mx-auto mb-2" />
-                <p className="text-blue-700">Scan a bag to automatically create a box for its pickup point</p>
+                <p className="text-blue-700">
+                  Scan a bag to automatically create a box for its pickup point
+                </p>
               </div>
             )}
 
-            {/* Bags in Current Box */}
             {currentBox && currentBox.bags && currentBox.bags.length > 0 && (
               <div className="rounded-md border bg-white">
                 <Table>
@@ -336,7 +323,9 @@ export function BoxingStation() {
                       <TableRow key={bag.id}>
                         <TableCell className="font-mono text-xs">{bag.barcode}</TableCell>
                         <TableCell className="font-medium">{bag.patientName}</TableCell>
-                        <TableCell className="text-xs">{bag.patientRecord?.regimen || '-'}</TableCell>
+                        <TableCell className="text-xs">
+                          {bag.patientRecord?.regimen || '-'}
+                        </TableCell>
                         <TableCell>{getStatusBadge(bag.status)}</TableCell>
                       </TableRow>
                     ))}
@@ -365,52 +354,58 @@ export function BoxingStation() {
                   <TableHead>Status</TableHead>
                   <TableHead>Logistics Status</TableHead>
                   <TableHead>Created</TableHead>
-                  <TableHead>Updated</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {boxes.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={9} className="text-center text-slate-500 py-8">
+                    <TableCell colSpan={8} className="text-center text-slate-500 py-8">
                       No boxes created yet. Scan a bag to start boxing.
                     </TableCell>
                   </TableRow>
                 ) : (
                   boxes.map((box) => (
                     <TableRow key={box.id}>
-                      <TableCell className="font-mono text-xs font-medium">{box.boxNumber}</TableCell>
+                      <TableCell className="font-mono text-xs font-medium">
+                        {box.boxNumber}
+                      </TableCell>
                       <TableCell>{box.destinationLocation}</TableCell>
                       <TableCell>{box.collectionDate || '-'}</TableCell>
                       <TableCell>{box.bags?.length || 0}</TableCell>
                       <TableCell>{getStatusBadge(box.status)}</TableCell>
                       <TableCell>{getLogisticsStatusBadge(box.logisticsStatus)}</TableCell>
-                      <TableCell className="text-sm">{new Date(box.createdAt).toLocaleString()}</TableCell>
-                      <TableCell className="text-sm">{new Date(box.updatedAt).toLocaleString()}</TableCell>
+                      <TableCell className="text-sm">
+                        {new Date(box.createdAt).toLocaleString()}
+                      </TableCell>
                       <TableCell className="text-right">
-                        {(box.logisticsStatus !== 'RETRYING') && (
-                          <Button 
-                            variant="outline" 
-                            size="sm"
-                            onClick={() => handleRetrySend(box.id)}
-                            className="text-red-600 border-red-300 hover:bg-red-50"
-                          >
-                            <RefreshCw className="w-3 h-3 mr-1" />
-                            Retry
-                          </Button>
-                        )}
-                        {/* Reprint Box Label button - show for all closed/sent boxes */}
-                        {(box.status === 'CLOSED' || box.status === 'SENT') && (
-                          <Button 
-                            variant="outline" 
-                            size="sm"
-                            onClick={() => handleReprintBoxLabel(box.id, box.boxNumber)}
-                            className="text-blue-600 border-blue-300 hover:bg-blue-50"
-                          >
-                            <RefreshCw className="w-3 h-3 mr-1" />
-                            Reprint Label
-                          </Button>
-                        )}
+                        <div className="flex gap-2 justify-end">
+                          {/* 🔥 NEW: Print Manifest button */}
+                          {(box.status === 'CLOSED' || box.status === 'SENT') && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handlePrintManifest(box.id, box.boxNumber)}
+                              className="text-purple-600 border-purple-300 hover:bg-purple-50"
+                              disabled={loading}
+                            >
+                              <FileText className="w-3 h-3 mr-1" />
+                              Manifest
+                            </Button>
+                          )}
+                          {/* Retry button for failed logistics */}
+                          {box.logisticsStatus === 'FAILED' && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleRetrySend(box.id)}
+                              className="text-red-600 border-red-300 hover:bg-red-50"
+                            >
+                              <RefreshCw className="w-3 h-3 mr-1" />
+                              Retry
+                            </Button>
+                          )}
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))
@@ -439,7 +434,7 @@ export function BoxingStation() {
             </div>
             <div className="flex items-center gap-2">
               <div className="w-3 h-3 rounded-full bg-red-500"></div>
-              <span className="text-slate-600">FAILED - Send failed, click Retry</span>
+              <span className="text-slate-600">FAILED - Click Retry</span>
             </div>
           </div>
         </CardContent>

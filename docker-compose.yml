@@ -20,14 +20,18 @@ services:
       - ./backend:/app
       - /app/node_modules
     ports:
-      - "3000:3000"
+      - "0.0.0.0:3000:3000"
     environment:
       DATABASE_URL: postgresql://dev_user:dev_password@db:5432/pharmacy_mgmt
-      # Printer IPs as environment variables
+      # Thermal printer (labels)
       TSC_PRINTER_IP: "192.168.26.43"
       TSC_PRINTER_PORT: "9100"
+      # Laser printer (manifests)
       HP_PRINTER_IP: "192.168.26.41"
       HP_PRINTER_PORT: "9100"
+      # Zebra printer (dispensing slips) - via shared printer
+      ZEBRA_PRINTER_IP: "192.168.26.44"
+      ZEBRA_PRINTER_PORT: "9100"
     depends_on:
       - db
     networks:
@@ -45,7 +49,7 @@ services:
       - ./frontend:/app
       - /app/node_modules
     ports:
-      - "5173:5173"
+      - "0.0.0.0:5173:5173"
     depends_on:
       - api
     environment:

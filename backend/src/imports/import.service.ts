@@ -619,6 +619,117 @@ export class ImportService {
     return batches || [];
   }
 
+  /**
+   * Print box manifest for a specific box
+   */
+  async printBoxManifest(boxId: string) {
+    const box = await this.boxRepo.findOne({
+      where: { id: boxId },
+      relations: ['bags', 'bags.patientRecord', 'drugPickupPoint'],
+    });
+
+    if (!box) {
+      throw new Error('Box not found');
+    }
+
+    const bags = box.bags || [];
+
+    if (bags.length === 0) {
+      throw new Error(
+        `Box ${box.boxNumber} has no bags to include in manifest`,
+      );
+    }
+
+    const items = bags.map((bag) => ({
+      patientName: bag.patientName,
+      patientId: bag.patientRecord?.patientUniqueId || 'N/A',
+      regimen: bag.patientRecord?.regimen || 'N/A',
+    }));
+
+    const manifestData = {
+      boxNumber: box.boxNumber,
+      destinationLocation: box.destinationLocation || 'Unknown',
+      items: items,
+      totalItems: items.length,
+      collectionDate: box.collectionDate || new Date().toLocaleDateString(),
+    };
+
+    try {
+      await this.printService.printManifest(manifestData);
+      this.logger.log(`✅ Manifest printed for box: ${box.boxNumber}`);
+      return {
+        success: true,
+        message: `Manifest printed for ${box.boxNumber}`,
+        boxNumber: box.boxNumber,
+        itemCount: items.length,
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error occurred';
+      this.logger.error(`❌ Failed to print manifest: ${errorMessage}`);
+      throw new Error(`Failed to print manifest: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * Print dispensing slip for a record
+   */
+  async printDispensingSlip(recordId: string, bagBarcode: string) {
+    const record = await this.patientRepo.findOne({
+      where: { id: recordId },
+      relations: ['drugPickupPointEntity', 'batch'],
+    });
+
+    if (!record) {
+      throw new Error('Patient record not found');
+    }
+
+    const batch = record.batch;
+    const numberOfRepeats = batch?.numberOfRepeats || 1;
+    const dosageInstructions =
+      batch?.dosageInstructions || 'Take as prescribed';
+
+    const pickupPointName =
+      record.drugPickupPointEntity?.name ||
+      record.drugPickupPoint ||
+      'Not specified';
+
+    let collectionDateString = new Date().toLocaleDateString();
+    if (record.nextDrugPickupDate) {
+      if (record.nextDrugPickupDate instanceof Date) {
+        collectionDateString = record.nextDrugPickupDate.toLocaleDateString();
+      } else if (typeof record.nextDrugPickupDate === 'string') {
+        collectionDateString = new Date(
+          record.nextDrugPickupDate,
+        ).toLocaleDateString();
+      }
+    }
+
+    const slipData = {
+      patientName: `${record.firstName} ${record.lastName}`,
+      patientId: record.patientUniqueId || 'N/A',
+      regimen: record.regimen,
+      dosageInstructions: dosageInstructions,
+      collectionLocation: pickupPointName,
+      collectionDate: collectionDateString,
+      numberOfBottles: numberOfRepeats,
+      bagBarcode: bagBarcode,
+    };
+
+    try {
+      await this.printService.printDispensingSlip(slipData);
+      this.logger.log(
+        `✅ Dispensing slip printed for: ${slipData.patientName}`,
+      );
+      return { success: true, message: 'Dispensing slip printed' };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error occurred';
+      this.logger.error(`❌ Failed to print dispensing slip: ${errorMessage}`);
+      throw new Error(`Failed to print dispensing slip: ${errorMessage}`);
+    }
+  }
+
   async processAndPrint(recordId: string) {
     const record = await this.patientRepo.findOne({
       where: { id: recordId },
@@ -640,7 +751,6 @@ export class ImportService {
       'Not specified';
     const pickupPointId = record.drugPickupPointEntity?.id || null;
 
-    // Create bag with proper property names
     const newBag = new Bag();
     newBag.barcode = bagBarcode;
     newBag.patientName = `${record.firstName} ${record.lastName}`;
@@ -663,7 +773,7 @@ export class ImportService {
       }
     }
 
-    // Print Bag Label
+    // 1. Print Bag Label
     const bagLabelData = {
       type: 'bag' as const,
       barcode: bagBarcode,
@@ -684,7 +794,7 @@ export class ImportService {
       this.logger.error(`❌ Failed to print bag label: ${errorMessage}`);
     }
 
-    // Print Product Labels for each repeat (bottle)
+    // 2. Print Product Labels (one per bottle)
     for (let i = 1; i <= numberOfRepeats; i++) {
       const productLabelData = {
         patientName: `${record.firstName} ${record.lastName}`,
@@ -696,10 +806,7 @@ export class ImportService {
 
       try {
         await this.printService.printProductLabel(productLabelData);
-        this.logger.log(
-          `✅ Product label ${i}/${numberOfRepeats} printed for: ${record.firstName} ${record.lastName}`,
-        );
-        // Small delay between labels to prevent printer jamming
+        this.logger.log(`✅ Product label ${i}/${numberOfRepeats} printed`);
         await this.delay(500);
       } catch (error) {
         const errorMessage =
@@ -710,13 +817,25 @@ export class ImportService {
       }
     }
 
+    // 3. Print Dispensing Slip (replaces EPSON placeholder)
+    try {
+      await this.printDispensingSlip(record.id, bagBarcode);
+      this.logger.log(
+        `✅ Dispensing slip printed for: ${record.firstName} ${record.lastName}`,
+      );
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error occurred';
+      this.logger.error(`❌ Failed to print dispensing slip: ${errorMessage}`);
+    }
+
     record.status = 'PRINTED';
     await this.patientRepo.save(record);
 
     return {
       success: true,
       bagBarcode,
-      message: `Bag label and ${numberOfRepeats} product label(s) printed for ${record.firstName} ${record.lastName}`,
+      message: `Bag label, ${numberOfRepeats} product label(s), and dispensing slip printed for ${record.firstName} ${record.lastName}`,
       numberOfRepeats: numberOfRepeats,
     };
   }
@@ -921,11 +1040,9 @@ export class ImportService {
       throw new Error('Box not found');
     }
 
-    // Update status to CLOSED
     box.status = 'CLOSED';
     await this.boxRepo.save(box);
 
-    // Prepare bags for logistics
     const bags = box.bags || [];
 
     if (bags.length === 0) {
@@ -938,7 +1055,7 @@ export class ImportService {
       };
     }
 
-    // 🔥 PRINT BOX LABEL
+    // 🔥 1. PRINT BOX LABEL
     try {
       const boxLabelData = {
         type: 'box' as const,
@@ -953,19 +1070,28 @@ export class ImportService {
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error occurred';
       this.logger.error(`❌ Failed to print box label: ${errorMessage}`);
-      // Continue with logistics even if printing fails
     }
 
+    // 🔥 2. PRINT MANIFEST (NEW)
     try {
-      // Send to logistics system using the updated service (now expects boxId)
+      await this.printBoxManifest(box.id);
+      this.logger.log(`✅ Manifest printed for: ${box.boxNumber}`);
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error occurred';
+      this.logger.error(`❌ Failed to print manifest: ${errorMessage}`);
+    }
+
+    // 3. Send to logistics
+    try {
       const result = await this.logisticsService.sendBoxToLogistics(box.id);
 
       if (result.statusCode === 200) {
-        // Box status will be updated by the logistics service to SENT
         this.logger.log(`Box ${box.boxNumber} successfully sent to logistics`);
         return {
           success: true,
-          message: 'Box closed and sent to logistics system',
+          message:
+            'Box closed, label printed, manifest printed, and sent to logistics',
           boxNumber: box.boxNumber,
           bagsCount: bags.length,
         };
@@ -977,10 +1103,9 @@ export class ImportService {
         error instanceof Error ? error.message : 'Unknown error occurred';
       this.logger.error(`Failed to send box to logistics: ${errorMessage}`);
 
-      // Box remains CLOSED but not SENT - can retry later
       return {
         success: false,
-        message: `Box closed but failed to send to logistics: ${errorMessage}`,
+        message: `Box closed and printed but failed to send to logistics: ${errorMessage}`,
         boxNumber: box.boxNumber,
         bagsCount: bags.length,
       };

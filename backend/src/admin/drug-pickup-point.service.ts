@@ -11,16 +11,92 @@ import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
 
+/**
+ * 🔥 HARDCODED PICKUP POINT TRANSLATIONS
+ * These are exact (normalized) matches that take priority over fuzzy matching.
+ * Key = normalized alias from the file
+ * Value = normalized DB name to look up
+ *
+ * If you need to add more, just add them to this map.
+ */
+const PUP_ALIASES: Record<string, string> = {
+  // ============ EXACT TRANSLATIONS FROM YOUR LIST ============
+  'kayalethu pharmacy (tsolo)': 'kayalethu pharmacy (tsolo) pup',
+  'qoaling elocker': 'qoaling filter clinic collect&go',
+  'dial for life pharmacy (lithoteng)':
+    'dial for life pharmacy (lithoteng) pup',
+  'pholohong pharmacy (ha abia)': 'pholohong pharmacy pup',
+  'wamma pharmacy (matala)': 'wamma pharmacy matala pup',
+  'e-locker ntshekhe hospital': 'ntsekhe elocker',
+  'ether pharmacy (kingsway)': 'ether pharmacy (kingsway)',
+  'likotsi filter clinic, maseru': 'likotsi filter clinic collect&go',
+  'husteds (kingsway)': 'husteds pharmacy kingsway pup',
+  'family health pharmacy (thetsane)': 'family health pharmacy pup',
+  'medicos pharmacy (ha tsolo)': 'medicos pharmacy pup',
+  'wamma  pharmacy (pitso ground)': 'wamma pharmacy pitso ground pup',
+  'maletsunyane pharmacy (qoaling)': 'maletsunyane pharmacy (qoaling) pup',
+  's&t pharmacy (sefika)': 's&t pharmacy pup',
+  'mago enterprise (khubetsoana)': 'mago enterprise (khubetsoana) pharmacy pup',
+  'elocker mafeteng hospital': 'mafeteng hospital collect&go',
+  'elocker ntsekhe hospital': 'ntsekhe elocker',
+  'qualipro (lekhaloaneng)': 'quali pro pharmacy lekhalaneng pup',
+  'maseru baylor clinic': 'baylor paediatric collect&go',
+  'bakoena pharmacy (town)': 'bakoena pharmacy pup',
+  'pharma best pharmacy (town)': 'pharm best pharmacy pup',
+  'medical healthcare (town)': 'naleli medic health care pharmacy pup',
+  'qualipro (nelese)': 'quali pro pharmacy nelese pup',
+  'best care pharmacy ( leqele)': 'best care pharmacy (leqele) pup',
+  'maseru mall': 'maseru mall collect&go',
+  'nazareth hc elocker': 'nazareth health centre collect&go',
+  'exceed pharmacy (roma)': 'exceed pharmacy (roma) pup',
+  'machache (naleli)': 'machache naleli pharmacy pup',
+  'holy cross hc e-locker': 'holy cross elocker',
+  'medic discount pharmacy (roma)': 'medic discount pharmacy (roma) pup',
+  'bophelong medicare pharmacy (town)': 'bophelong pharmacy pup',
+  'domiciliary hc': 'domiciliary health clinic collect&go',
+  'animan pharmacy (khubetsoana)': 'animan pharmacy pup',
+  'medic health care (naleli)': 'naleli medic health care pharmacy pup',
+  'husteds (lndc)': 'husteds lndc pharmacy pup',
+  'matsieng hc, maseru': 'matsieng clinic collect&go',
+  'pioneer mall': 'pioneer mall collect&go',
+  'capricon pharmacy (town)': 'capricorn pharmacy pup',
+  'theo pharmaceuticals': 'theo pharmaceuticals pup',
+  'medicos pharmacy': 'medicos pharmacy pup',
+  'pholohong pharmacy': 'pholohong pharmacy pup',
+  'khayalethu pharmacy': 'kayalethu pharmacy (tsolo) pup',
+  'dial for life pharmacy': 'dial for life pharmacy (lithoteng) pup',
+  'maletsunyane qoaling': 'maletsunyane pharmacy (qoaling) pup',
+  'qoali pro lekhalaneng': 'quali pro pharmacy lekhalaneng pup',
+  's$t pharmacy': 's&t pharmacy pup',
+  'dial for life pharmacy ': 'dial for life pharmacy (lithoteng) pup',
+  'wamma pharmacy pitso ground': 'wamma pharmacy pitso ground pup',
+  'rite care pharmacy( motsekuoa)': 'rite care pharmacy pup',
+  'quali-pro  lekhalaneng': 'quali pro pharmacy lekhalaneng pup',
+  'husteds pharmacy': 'husteds pharmacy kingsway pup',
+  'quali pro pharmacy ha nnelese': 'quali pro pharmacy nelese pup',
+  'maletsunyane (qoaling)': 'maletsunyane pharmacy (qoaling) pup',
+  'qualipro (lekhalaneng)': 'quali pro pharmacy lekhalaneng pup',
+  'dial for life (lithoteng)': 'dial for life pharmacy (lithoteng) pup',
+  'medicos pharmacy ': 'medicos pharmacy pup',
+  's&t pharmacy': 's&t pharmacy pup',
+  medicos: 'medicos pharmacy pup',
+  'snt pharmacy': 's&t pharmacy pup',
+  'family health': 'family health pharmacy pup',
+  'ntsekhe hos': 'ntsekhe elocker',
+  'ntsekhe e-locker ': 'ntsekhe elocker',
+  'medical healthcare': 'naleli medic health care pharmacy pup',
+  'bophelong medicare pharmacy': 'bophelong pharmacy pup',
+  'nazareth hc e locker': 'nazareth health centre collect&go',
+  'medical healthcare pharmacy': 'naleli medic health care pharmacy pup',
+  'domiciliary e locker': 'domiciliary health clinic collect&go',
+  'elocker thabana morena': 'thabana morena collect&go',
+};
+
 @Injectable()
 export class DrugPickupPointService {
   private readonly logger = new Logger(DrugPickupPointService.name);
   private readonly API_BASE_URL =
     'http://api.bonolohealth.gov.ls/api/Ministry%20of%20Health';
-
-  // Cache for pickup points to avoid repeated DB queries
-  private cachedPickupPoints: DrugPickupPoint[] | null = null;
-  private cacheTimestamp: number = 0;
-  private readonly CACHE_TTL = 60000; // 60 seconds
 
   constructor(
     @InjectRepository(DrugPickupPoint)
@@ -36,23 +112,12 @@ export class DrugPickupPointService {
     this.logger.log(`Starting API fetch with GUID: ${guid}`);
 
     try {
-      // Step 1: POST request with GUID
       await this.sendPostRequest(guid);
-
-      // Step 2: Wait for response (polling pattern)
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const responseData = await this.pollForResponse(guid);
-
-      // Step 3: Parse and sync the data
       const pickupPoints = this.parseApiResponse(responseData);
       this.logger.log(`Received ${pickupPoints.length} pickup points from API`);
 
-      const synced = await this.syncPickupPoints(pickupPoints);
-
-      // Invalidate cache after sync
-      this.invalidateCache();
-
-      return synced;
+      return await this.syncPickupPoints(pickupPoints);
     } catch (error) {
       this.logger.error(
         `Failed to fetch from external API: ${(error as Error).message}`,
@@ -64,9 +129,6 @@ export class DrugPickupPointService {
     }
   }
 
-  /**
-   * Send POST request to initiate the API call
-   */
   private async sendPostRequest(guid: string): Promise<void> {
     const requestBody = {
       Reference: guid,
@@ -75,24 +137,16 @@ export class DrugPickupPointService {
       Body: '{}',
     };
 
-    this.logger.debug(`Sending POST request with GUID: ${guid}`);
-    this.logger.debug(`Request body: ${JSON.stringify(requestBody)}`);
-
     try {
       const response = await firstValueFrom(
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
         this.httpService.post(this.API_BASE_URL, requestBody, {
-          headers: {
-            'Content-Type': 'application/json',
-          },
+          headers: { 'Content-Type': 'application/json' },
         }),
       );
 
       if (response.status !== 200) {
         throw new Error(`POST request failed with status: ${response.status}`);
       }
-
-      this.logger.debug(`POST request successful for GUID: ${guid}`);
     } catch (error) {
       this.logger.error(`POST request failed: ${(error as Error).message}`);
       throw new Error(
@@ -101,17 +155,11 @@ export class DrugPickupPointService {
     }
   }
 
-  /**
-   * Poll for the response using GET requests
-   */
   private async pollForResponse(
     guid: string,
     maxAttempts: number = 12,
     initialDelay: number = 3000,
   ): Promise<any> {
-    this.logger.debug(`Polling for response for GUID: ${guid}`);
-
-    // Initial wait before first poll
     await this.delay(initialDelay);
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -120,22 +168,15 @@ export class DrugPickupPointService {
           this.httpService.get(`${this.API_BASE_URL}/getMessage/${guid}`),
         );
 
-        // Check if we have a valid response with data
         if (
           response.data &&
           response.data.body &&
           response.data.body !== '{}' &&
           response.data.body !== 'null'
         ) {
-          this.logger.log(
-            `Response received on attempt ${attempt} for GUID: ${guid}`,
-          );
           return response.data;
         }
 
-        this.logger.debug(`Attempt ${attempt}: No response yet, waiting...`);
-
-        // Wait before next attempt (increase delay progressively)
         await this.delay(initialDelay * attempt);
       } catch (error) {
         this.logger.debug(
@@ -150,9 +191,6 @@ export class DrugPickupPointService {
     );
   }
 
-  /**
-   * Parse the API response - extracts locations from the nested body
-   */
   private parseApiResponse(responseData: any): Partial<DrugPickupPoint>[] {
     try {
       if (!responseData || !responseData.body) {
@@ -177,8 +215,6 @@ export class DrugPickupPointService {
         this.logger.warn('Unexpected data structure in API response');
         return [];
       }
-
-      this.logger.log(`Found ${locations.length} locations in API response`);
 
       return locations
         .map((location: any) => {
@@ -209,14 +245,10 @@ export class DrugPickupPointService {
       this.logger.error(
         `Failed to parse API response: ${(error as Error).message}`,
       );
-      this.logger.debug(`Raw response data: ${JSON.stringify(responseData)}`);
       throw new Error('Failed to parse API response data');
     }
   }
 
-  /**
-   * Sync pickup points with database
-   */
   async syncPickupPoints(
     externalData: Partial<DrugPickupPoint>[],
   ): Promise<DrugPickupPoint[]> {
@@ -235,10 +267,8 @@ export class DrugPickupPointService {
 
       if (point) {
         Object.assign(point, data);
-        this.logger.debug(`Updating existing pickup point: ${point.name}`);
       } else {
         point = this.pickupPointRepo.create(data);
-        this.logger.debug(`Creating new pickup point: ${point.name}`);
       }
 
       await this.pickupPointRepo.save(point);
@@ -246,52 +276,43 @@ export class DrugPickupPointService {
     }
 
     this.logger.log(`Synced ${syncedPoints.length} pickup points`);
-
-    // Invalidate cache after sync
-    this.invalidateCache();
-
     return syncedPoints;
   }
 
   /**
-   * Invalidate the cache
+   * 🔥 NEW: Look up a hardcoded alias and return the matching DB pickup point
+   * This runs BEFORE the fuzzy matcher.
    */
-  private invalidateCache(): void {
-    this.cachedPickupPoints = null;
-    this.cacheTimestamp = 0;
-  }
+  private lookupAlias(
+    normalizedName: string,
+    allPoints: DrugPickupPoint[],
+  ): DrugPickupPoint | null {
+    const targetName = PUP_ALIASES[normalizedName];
+    if (!targetName) return null;
 
-  /**
-   * Get all pickup points with caching
-   */
-  private async getCachedPickupPoints(): Promise<DrugPickupPoint[]> {
-    const now = Date.now();
-    if (this.cachedPickupPoints && now - this.cacheTimestamp < this.CACHE_TTL) {
-      return this.cachedPickupPoints;
+    // Find the DB pickup point whose normalized name matches the target
+    for (const point of allPoints) {
+      const normalizedPointName = this.normalizeString(point.name);
+      if (normalizedPointName === targetName) {
+        this.logger.debug(
+          `🎯 Alias match: "${normalizedName}" → "${point.name}"`,
+        );
+        return point;
+      }
     }
 
-    // Cache miss - fetch from database
-    this.cachedPickupPoints = await this.pickupPointRepo.find({
-      order: { name: 'ASC' },
-      where: { isActive: true },
-    });
-    this.cacheTimestamp = now;
-    return this.cachedPickupPoints;
+    // Alias exists but the target DB name was not found
+    this.logger.warn(
+      `⚠️ Alias maps "${normalizedName}" → "${targetName}" but no pickup point with that name was found in the DB`,
+    );
+    return null;
   }
 
   /**
-   * Get all pickup points as an array (async)
-   */
-  async getAllPickupPoints(): Promise<DrugPickupPoint[]> {
-    return await this.pickupPointRepo.find({
-      order: { name: 'ASC' },
-      where: { isActive: true },
-    });
-  }
-
-  /**
-   * Find best matching pickup point by name (SYNCHRONOUS)
-   * Uses the provided list of pickup points to match against
+   * Find best matching pickup point (SYNCHRONOUS)
+   * Priority:
+   *   1. Hardcoded alias lookup
+   *   2. Fuzzy matching with prefix bonus
    */
   findBestMatchSync(
     name: string,
@@ -301,8 +322,15 @@ export class DrugPickupPointService {
     if (!pickupPoints || pickupPoints.length === 0) return null;
 
     const normalizedInput = this.normalizeString(name);
-    const inputWords = normalizedInput.split(' ');
 
+    // 🔥 STEP 1: Try hardcoded alias lookup first
+    const aliasMatch = this.lookupAlias(normalizedInput, pickupPoints);
+    if (aliasMatch) {
+      return aliasMatch;
+    }
+
+    // 🔥 STEP 2: Fall back to fuzzy matching
+    const inputWords = normalizedInput.split(' ');
     let bestMatch: DrugPickupPoint | null = null;
     let bestScore = 0;
 
@@ -310,13 +338,11 @@ export class DrugPickupPointService {
       const normalizedPoint = this.normalizeString(point.name);
       const pointWords = normalizedPoint.split(' ');
 
-      // Calculate base similarity
       const baseScore = this.calculateSimilarity(
         normalizedInput,
         normalizedPoint,
       );
 
-      // Calculate prefix bonus
       let prefixMatchCount = 0;
       for (let i = 0; i < inputWords.length && i < pointWords.length; i++) {
         if (
@@ -334,7 +360,6 @@ export class DrugPickupPointService {
         inputWords.length > 0 ? prefixMatchCount / inputWords.length : 0;
       const prefixBonus = prefixRatio * 0.3;
 
-      // Bonus for "Collect&Go" pattern matching
       let collectGoBonus = 0;
       if (
         normalizedInput.includes('collect') &&
@@ -359,7 +384,11 @@ export class DrugPickupPointService {
 
     if (bestMatch) {
       this.logger.debug(
-        `✅ Best match for "${name}" is "${bestMatch.name}" (score: ${bestScore.toFixed(3)})`,
+        `✅ Fuzzy match: "${name}" → "${bestMatch.name}" (score: ${bestScore.toFixed(3)})`,
+      );
+    } else {
+      this.logger.debug(
+        `❌ No match found for "${name}" (best score: ${bestScore.toFixed(3)})`,
       );
     }
 
@@ -367,11 +396,12 @@ export class DrugPickupPointService {
   }
 
   /**
-   * Find best matching pickup point by name (ASYNCHRONOUS - for other use cases)
-   
+   * Async version (kept for other use cases)
+   */
   async findBestMatch(name: string): Promise<DrugPickupPoint | null> {
-    return await this.findBestMatchSync(name);
-  }*/
+    const all = await this.getAllPickupPoints();
+    return this.findBestMatchSync(name, all);
+  }
 
   /**
    * Normalize a string for comparison
@@ -387,9 +417,6 @@ export class DrugPickupPointService {
       .replace(/\s+/g, ' ');
   }
 
-  /**
-   * Calculate similarity between two strings (0-1)
-   */
   private calculateSimilarity(str1: string, str2: string): number {
     if (!str1 || !str2) return 0;
 
@@ -422,16 +449,17 @@ export class DrugPickupPointService {
     return Math.min(commonWords / maxLength, 1.0);
   }
 
-  /**
-   * Delay helper
-   */
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  /**
-   * Get all pickup points
-   */
+  async getAllPickupPoints(): Promise<DrugPickupPoint[]> {
+    return await this.pickupPointRepo.find({
+      order: { name: 'ASC' },
+      where: { isActive: true },
+    });
+  }
+
   async findAll(): Promise<DrugPickupPoint[]> {
     return await this.pickupPointRepo.find({
       order: { name: 'ASC' },
@@ -439,49 +467,28 @@ export class DrugPickupPointService {
     });
   }
 
-  /**
-   * Get all pickup points including inactive
-   */
   async findAllIncludingInactive(): Promise<DrugPickupPoint[]> {
-    return await this.pickupPointRepo.find({
-      order: { name: 'ASC' },
-    });
+    return await this.pickupPointRepo.find({ order: { name: 'ASC' } });
   }
 
-  /**
-   * Create a new pickup point
-   */
   async create(data: Partial<DrugPickupPoint>): Promise<DrugPickupPoint> {
     const point = this.pickupPointRepo.create(data);
-    this.invalidateCache();
     return await this.pickupPointRepo.save(point);
   }
 
-  /**
-   * Update a pickup point
-   */
   async update(
     id: string,
     data: Partial<DrugPickupPoint>,
   ): Promise<DrugPickupPoint> {
     await this.pickupPointRepo.update(id, data);
-    this.invalidateCache();
     return await this.pickupPointRepo.findOneOrFail({ where: { id } });
   }
 
-  /**
-   * Delete a pickup point (soft delete by setting isActive to false)
-   */
   async delete(id: string): Promise<void> {
     await this.pickupPointRepo.update(id, { isActive: false });
-    this.invalidateCache();
   }
 
-  /**
-   * Hard delete a pickup point (use with caution)
-   */
   async hardDelete(id: string): Promise<void> {
     await this.pickupPointRepo.delete(id);
-    this.invalidateCache();
   }
 }
