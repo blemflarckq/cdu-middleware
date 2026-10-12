@@ -1113,6 +1113,42 @@ export class ImportService {
   }
 
   /**
+   * Reprint box label for a box
+   */
+  async reprintBoxLabel(boxId: string) {
+    const box = await this.boxRepo.findOne({
+      where: { id: boxId },
+      relations: ['drugPickupPoint'],
+    });
+
+    if (!box) {
+      throw new Error('Box not found');
+    }
+
+    const boxLabelData = {
+      type: 'box' as const,
+      barcode: box.boxNumber,
+      collectionDate: box.collectionDate || new Date().toLocaleDateString(),
+      pickupPoint: box.destinationLocation || 'Unknown',
+    };
+
+    try {
+      await this.printService.printBoxLabel(boxLabelData);
+      this.logger.log(`✅ Box label reprinted for: ${box.boxNumber}`);
+      return {
+        success: true,
+        message: `Box label reprinted for ${box.boxNumber}`,
+        boxNumber: box.boxNumber,
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error occurred';
+      this.logger.error(`❌ Failed to reprint box label: ${errorMessage}`);
+      throw new Error(`Failed to reprint box label: ${errorMessage}`);
+    }
+  }
+
+  /**
    * Retry sending a failed box to logistics
    */
   async retrySendBox(boxId: string): Promise<unknown> {

@@ -1,51 +1,53 @@
-// src/print/print.controller.ts
-import { Controller, Post, Body, Get, Param } from '@nestjs/common';
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
+/* eslint-disable @typescript-eslint/no-unsafe-call */
+/* eslint-disable @typescript-eslint/no-unsafe-return */
+import { Controller, Post, Param, Get, Body } from '@nestjs/common';
 import { PrintService } from './print.service';
 
 @Controller('print')
 export class PrintController {
   constructor(private readonly printService: PrintService) {}
 
-  @Post('bag-label')
-  async printBagLabel(@Body() data: any) {
-    await this.printService.printBagLabel(data);
-    return { success: true, message: 'Bag label printed' };
-  }
-
-  @Post('box-label')
-  async printBoxLabel(@Body() data: any) {
-    await this.printService.printBoxLabel(data);
-    return { success: true, message: 'Box label printed' };
-  }
-
-  @Post('manifest')
-  async printManifest(@Body() data: any) {
-    await this.printService.printManifest(data);
-    return { success: true, message: 'Manifest printed' };
-  }
-
   @Get('test/:printer')
-  async testPrinter(@Param('printer') printer: 'tsc' | 'hp') {
+  async testPrinter(@Param('printer') printer: 'tsc' | 'hp' | 'zebra') {
     const result = await this.printService.testPrinterConnection(printer);
     return { printer, connected: result };
   }
 
-  @Post('test-label')
-  async testLabel() {
-    const testData = {
-      type: 'bag' as const,
-      barcode: 'TEST001',
-      patientName: 'John',
-      patientSurname: 'Doe',
-      collectionDate: '10/26/2026',
-      pickupPoint: 'Maseru Regional Hospital Collect&Go',
+  @Post('bag-label')
+  async printBagLabel(@Body() data: any) {
+    const result = await this.printService.printBagLabel(data);
+    return {
+      success: result,
+      message: result ? 'Bag label printed' : 'Print failed',
     };
-    return await this.printService.printBagLabel(testData);
   }
 
-  @Post('reprint-box-label/:boxId')
-  async reprintBoxLabel(@Param('boxId') boxId: string) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-    return await this.printService.reprintBoxLabel(boxId);
+  @Post('box-label')
+  async printBoxLabel(@Body() data: any) {
+    const result = await this.printService.printBoxLabel(data);
+    return {
+      success: result,
+      message: result ? 'Box label printed' : 'Print failed',
+    };
+  }
+
+  @Post('manifest')
+  async printManifest(@Body() data: any) {
+    const result = await this.printService.printManifest(data);
+    return {
+      success: result,
+      message: result ? 'Manifest printed' : 'Print failed',
+    };
+  }
+
+  @Post('dispensing-slip')
+  async printDispensingSlip(@Body() data: any) {
+    const result = await this.printService.printDispensingSlip(data);
+    return {
+      success: result,
+      message: result ? 'Dispensing slip printed' : 'Print failed',
+    };
   }
 }

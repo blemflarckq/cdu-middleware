@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
+/* eslint-disable @typescript-eslint/no-unsafe-call */
+/* eslint-disable @typescript-eslint/no-unsafe-return */
 /* eslint-disable @typescript-eslint/no-unsafe-argument */
 import { Controller, Post, Get, Patch, Body, Param } from '@nestjs/common';
 import { ImportService } from './import.service';
@@ -136,5 +139,15 @@ export class ImportController {
       recordId,
       body.bagBarcode,
     );
+  }
+  @Post('reprint-box-label/:boxId')
+  async reprintBoxLabel(@Param('boxId') boxId: string) {
+    return await this.importService.reprintBoxLabel(boxId);
+  }
+
+  // Reprint a manifest
+  @Post('reprint-manifest/:boxId')
+  async reprintManifest(@Param('boxId') boxId: string) {
+    return await this.importService.printBoxManifest(boxId);
   }
 }
